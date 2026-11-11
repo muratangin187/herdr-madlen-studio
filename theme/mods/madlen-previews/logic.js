@@ -4,12 +4,16 @@ export const REPOS = ["madlen-deploy-api", "madlen-teacher", "madlen-exam"];
 export const REPO_LABEL = { "madlen-deploy-api": "API", "madlen-teacher": "Teacher", "madlen-exam": "Exam" };
 export const TRIGGER = "@madlen-agent deploy";
 export const MERGED_DAYS = 7;
+// Reviewer listesinde gösterilmeyen ortak/bot hesaplar.
+export const NOT_REVIEWERS = ["devmadlen"];
 
 export const canPreview = (repo) => REPOS.includes(repo);
 export const repoLabel = (repo) => REPO_LABEL[repo] ?? repo.replace(/^madlen-/, "");
 
 const FIELDS = `nodes { ... on PullRequest { number title url isDraft merged mergedAt headRefName updatedAt repository { name }
-    comments(last: 40) { nodes { author { login } body createdAt } } } }`;
+    comments(last: 40) { nodes { author { login } body createdAt } }
+    reviewRequests(first: 10) { nodes { requestedReviewer { ... on User { login } } } }
+    latestReviews(first: 10) { nodes { author { login } state } } } }`;
 
 export function query(now = Date.now()) {
   const since = new Date(now - MERGED_DAYS * 86400000).toISOString().slice(0, 10);
@@ -51,6 +55,24 @@ export function previewStatus(comments) {
   return { state, since: comments[idx].createdAt, url: state === "ready" ? url ?? lastUrl : null, run, lastUrl };
 }
 
+// login -> requested | APPROVED | CHANGES_REQUESTED | COMMENTED; yeniden istenen review "requested" sayılır.
+export function reviewersOf(n) {
+  const out = {};
+  for (const r of n.latestReviews?.nodes ?? []) if (r.author?.login && r.state !== "PENDING") out[r.author.login] = r.state;
+  for (const r of n.reviewRequests?.nodes ?? []) if (r.requestedReviewer?.login) out[r.requestedReviewer.login] = "requested";
+  return out;
+}
+
+// Organizasyon üyeleri: kendin ve ortak hesaplar hariç, PR'larında en çok reviewer olanlar önce.
+export function rankMembers(members, groups, me) {
+  const count = {};
+  for (const g of groups ?? []) for (const pr of g.prs) for (const login of Object.keys(pr.reviewers ?? {})) count[login] = (count[login] ?? 0) + 1;
+  return members.filter((m) => m !== me && !NOT_REVIEWERS.includes(m))
+    .sort((a, b) => (count[b] ?? 0) - (count[a] ?? 0) || a.localeCompare(b));
+}
+
+export const previewHost = (url) => (url ?? "").replace(/^https?:\/\//, "");
+
 export function issueKey(pr) {
   const m = (pr.headRefName + " " + pr.title).match(/mad-(\d+)/i);
   return m ? "MAD-" + m[1] : "Diğer";
@@ -65,7 +87,7 @@ export function groupPrs(nodes) {
     seen.add(n.url);
     const pr = { repo: n.repository.name, number: n.number, title: n.title, url: n.url, draft: n.isDraft,
       merged: Boolean(n.merged), mergedAt: n.mergedAt, branch: n.headRefName, updatedAt: n.mergedAt ?? n.updatedAt,
-      preview: previewStatus(n.comments?.nodes ?? []) };
+      preview: previewStatus(n.comments?.nodes ?? []), reviewers: reviewersOf(n) };
     const key = issueKey(n);
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(pr);
@@ -76,6 +98,9 @@ export function groupPrs(nodes) {
       updatedAt: prs.map((p) => p.updatedAt).sort().at(-1) }))
     .sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
 }
+
+// PR başlığının başındaki issue numaraları ("MAD-9340:", "MAD-8386/MAD-7243 -") grup başlığında zaten var.
+export const shortTitle = (t) => t.replace(/^\s*(\[?MAD-\d+\]?[\s/,+&]*)+[:\-–]?\s*/i, "").trim() || t;
 
 export const cleanTitle = (t) => t.replace(/^\s*(\[[^\]]*\]\s*)+/, "").trim();
 

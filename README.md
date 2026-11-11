@@ -49,7 +49,7 @@ Bu seçenek ayrıca `outputs-browser` modunu ve `~/.local/share/herdr-outputs/He
 
 ## PR'lar paneli
 
-Sol menüdeki **PR'lar**, madlenio'daki açık PR'larını (ve "Hepsi" seçiliyken son 7 günde merge edilenleri) Linear numarasına göre gruplar. API, Teacher ve Exam PR'larında son preview'in durumu ve linki görünür; **Preview al** iki tıklamayla o PR'a `@madlen-agent deploy` yorumu yazar, kendiliğinden hiçbir şey göndermez. GitHub'a kendi `gh` oturumunla bağlanır ve dakikada bir yenilenir. Linear eklentisinde oturum açıksa issue başlıkları da gösterilir.
+Sol menüdeki **PR'lar**, madlenio'daki açık PR'larını (ve "Hepsi" seçiliyken son 7 günde merge edilenleri) Linear numarasına göre kartlarda toplar. Her PR tek satırdır; reviewer'lar baş harfleriyle ve review durumlarıyla görünür. Satıra tıklayınca açılan alanda PR taslağa çevrilir veya review'a hazır yapılır, reviewer eklenir ya da çıkarılır. Kartın altında API, Teacher ve Exam preview'leri alt alta linkleriyle ve kopyala düğmesiyle durur; **Preview al ▾** seçilen PR'a `@madlen-agent deploy` yorumu yazar. PR'ın durumunu değiştiren her işlem iki tıklamayla onaylanır, panel kendiliğinden hiçbir şey göndermez. GitHub'a kendi `gh` oturumunla bağlanır ve dakikada bir yenilenir. Linear eklentisinde oturum açıksa issue başlıkları da gösterilir.
 
 ## Güncelleme ve geri dönüş
 

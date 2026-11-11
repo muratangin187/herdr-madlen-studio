@@ -1,5 +1,5 @@
 import assert from "node:assert";
-import { previewStatus, groupPrs, issueKey, cleanTitle, query, canPreview, repoLabel } from "./theme/mods/madlen-previews/logic.js";
+import { previewStatus, groupPrs, issueKey, cleanTitle, shortTitle, query, canPreview, repoLabel, reviewersOf, rankMembers } from "./theme/mods/madlen-previews/logic.js";
 
 const c = (login, body, createdAt = "2026-01-01T10:00:00Z") => ({ author: { login }, body, createdAt });
 const me = (body, t) => c("someone", body, t);
@@ -43,6 +43,13 @@ assert.equal(issueKey({ headRefName: "kaan/mad-42-x", title: "t" }), "MAD-42");
 assert.equal(issueKey({ headRefName: "feature", title: "MAD-7: t" }), "MAD-7");
 assert.equal(issueKey({ headRefName: "feature", title: "t" }), "Diğer");
 assert.equal(cleanTitle("[Feature Request] [Bug] Başlık"), "Başlık");
+assert.equal(shortTitle("MAD-9340: Belge okuyucusu"), "Belge okuyucusu");
+assert.equal(shortTitle("MAD-8386/MAD-7243: Ortak düzeltme"), "Ortak düzeltme");
+assert.equal(shortTitle("[TEST] MAD-1 Exam"), "[TEST] MAD-1 Exam", "only a leading issue key is trimmed");
+assert.deepEqual(reviewersOf({ latestReviews: { nodes: [{ author: { login: "a" }, state: "APPROVED" }, { author: { login: "b" }, state: "COMMENTED" }] },
+  reviewRequests: { nodes: [{ requestedReviewer: { login: "b" } }] } }), { a: "APPROVED", b: "requested" }, "a re-request wins over an old review");
+assert.deepEqual(rankMembers(["me", "devmadlen", "z", "y", "x"], [{ prs: [{ reviewers: { y: "requested" } }, { reviewers: { y: "APPROVED", z: "requested" } }] }], "me"),
+  ["y", "z", "x"], "self and shared accounts dropped, frequent reviewers first");
 assert.ok(canPreview("madlen-teacher") && !canPreview("teacher-chat"));
 assert.equal(repoLabel("madlen-deploy-api"), "API");
 assert.equal(repoLabel("madlen-teacher-tools"), "teacher-tools");
@@ -63,4 +70,4 @@ assert.deepEqual(groups[0].prs.map((p) => p.repo + "#" + p.number),
   ["madlen-deploy-api#2", "madlen-exam#4", "teacher-chat#5", "madlen-teacher#3"],
   "open before merged, preview repos first, duplicates dropped");
 
-console.log("PASS: preview states, issue grouping, ordering, query window");
+console.log("PASS: preview states, issue grouping, ordering, query window, titles, reviewers");

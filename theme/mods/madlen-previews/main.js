@@ -4,8 +4,8 @@
 // Linear başlıkları isteğe bağlıdır: Linear eklentisinin herdr-linear aracı ve oturumu varsa okunur.
 import { View, div, svg } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { exec, theme, appHome, readTextFile } from "herdr";
-import { ORG, query, TRIGGER, canPreview, repoLabel, groupPrs, ago, cleanTitle } from "./logic.js";
+import { exec, theme, appHome, readTextFile, run } from "herdr";
+import { ORG, query, TRIGGER, canPreview, repoLabel, groupPrs, ago, cleanTitle, rankMembers, previewHost, shortTitle } from "./logic.js";
 
 const POLL_MS = 60000;
 const CONFIRM_MS = 5000;
@@ -49,9 +49,16 @@ export default class Previews extends View {
     try { this.titles = JSON.parse(localStorage.getItem("issueTitles") ?? "{}"); } catch {}
     this.titleMiss = new Set();
     this.showMerged = false;
+    this.expanded = {};
+    this.busyAction = {};
+    this.members = null;
+    this.me = null;
+    this.menu = {};
+    this.copied = null;
     try { this.showMerged = localStorage.getItem("showMerged") === "1"; } catch {}
     cx.timer.every(POLL_MS, (cx) => this.refresh(cx));
     this.refresh(cx);
+    cx.spawn(async (cx) => { if (this.linear === undefined) this.linear = await linearSetup(); cx.notify(); });
   }
 
   refresh(cx) {
@@ -95,102 +102,249 @@ export default class Previews extends View {
 
   key(pr) { return pr.repo + "#" + pr.number; }
 
-  request(pr, cx) {
+  // İki tıklamalı onay: ilk tıklama işlemi işaretler, 5 saniye içinde ikincisi çalıştırır.
+  confirmed(action, cx) {
+    if (this.confirm?.key === action && Date.now() - this.confirm.at <= CONFIRM_MS) { this.confirm = null; return true; }
+    this.confirm = { key: action, at: Date.now() };
+    cx.timer.after(CONFIRM_MS + 50, (cx) => cx.notify());
+    cx.notify();
+    return false;
+  }
+
+  armed(action) { return this.confirm?.key === action && Date.now() - this.confirm.at <= CONFIRM_MS; }
+
+  // Bir PR üzerinde gh komutu: aynı PR'da aynı anda tek işlem; bitince liste yenilenir.
+  act(pr, action, args, cx, { onOk, refreshMs = 2500 } = {}) {
     const k = this.key(pr);
-    if (this.sending.has(k)) return;
-    if (this.confirm?.key !== k || Date.now() - this.confirm.at > CONFIRM_MS) {
-      this.confirm = { key: k, at: Date.now() };
-      cx.timer.after(CONFIRM_MS + 50, (cx) => cx.notify());
-      cx.notify();
-      return;
-    }
-    this.confirm = null;
+    if (this.sending.has(k) || !this.confirmed(action, cx)) return;
     this.sending.add(k);
+    this.busyAction[k] = action;
     delete this.sendError[k];
     cx.notify();
     cx.spawn(async (cx) => {
       try {
-        const r = await gh(["pr", "comment", String(pr.number), "-R", ORG + "/" + pr.repo, "--body", TRIGGER]);
+        const r = await gh(args);
         if (r.code !== 0) throw new Error((r.stderr || r.stdout || "gh hatası").trim());
-        pr.preview = { ...pr.preview, state: "building", since: new Date().toISOString(), url: null, run: null };
+        onOk?.();
       } catch (e) {
         this.sendError[k] = String(e.message ?? e);
       }
       this.sending.delete(k);
+      delete this.busyAction[k];
       cx.notify();
-      cx.timer.after(15000, (cx) => this.refresh(cx));
+      cx.timer.after(refreshMs, (cx) => this.refresh(cx));
+    });
+  }
+
+  request(pr, cx) {
+    this.act(pr, "preview:" + this.key(pr), ["pr", "comment", String(pr.number), "-R", ORG + "/" + pr.repo, "--body", TRIGGER], cx, {
+      refreshMs: 15000,
+      onOk: () => { pr.preview = { ...pr.preview, state: "building", since: new Date().toISOString(), url: null, run: null }; },
+    });
+  }
+
+  setDraft(pr, draft, cx) {
+    this.act(pr, (draft ? "draft:" : "ready:") + this.key(pr),
+      ["pr", "ready", String(pr.number), "-R", ORG + "/" + pr.repo, ...(draft ? ["--undo"] : [])], cx, { onOk: () => { pr.draft = draft; } });
+  }
+
+  reviewer(pr, login, add, cx) {
+    this.act(pr, (add ? "add:" : "remove:") + login + ":" + this.key(pr),
+      ["pr", "edit", String(pr.number), "-R", ORG + "/" + pr.repo, add ? "--add-reviewer" : "--remove-reviewer", login], cx, {
+        onOk: () => { pr.reviewers = { ...pr.reviewers }; if (add) pr.reviewers[login] = "requested"; else delete pr.reviewers[login]; },
+      });
+  }
+
+  loadMembers(cx) {
+    if (this.members) return;
+    this.members = [];
+    cx.spawn(async (cx) => {
+      try {
+        const [m, u] = await Promise.all([gh(["api", `orgs/${ORG}/members?per_page=100`, "--jq", ".[].login"]), gh(["api", "user", "--jq", ".login"])]);
+        this.members = m.code === 0 ? m.stdout.split("\n").map((s) => s.trim()).filter(Boolean) : [];
+        this.me = u.code === 0 ? u.stdout.trim() : null;
+      } catch { this.members = []; }
+      cx.notify();
     });
   }
 
   open(url) { if (url) exec("open", [url]); }
 
-  link(t, id, label, url) {
-    return div().id(id).px(7).py(2).rounded(5).text_size(11.5).text_color(t.accent).cursor_pointer()
-      .hover((s) => s.bg(t.hover)).tooltip(url).on_click((_e, cx) => { cx.stop_propagation(); this.open(url); }).child(label);
+  copy(url, id, cx) {
+    if (!url) return;
+    exec("sh", ["-c", 'printf %s "$1" | pbcopy', "sh", url]).catch(() => {});
+    this.copied = id;
+    cx.timer.after(1500, (cx) => { if (this.copied === id) { this.copied = null; cx.notify(); } });
+    cx.notify();
   }
 
-  status(t, pr) {
-    const p = pr.preview;
+  copyButton(t, id, url) {
+    const done = this.copied === id;
+    return div().id(id).flex_none().p(3).rounded(4).cursor_pointer().text_color(done ? t.done : t.dim)
+      .hover((s) => s.bg(t.hover).text_color(done ? t.done : t.foreground)).tooltip(done ? "Kopyalandı" : "Linki kopyala")
+      .on_click((_e, cx) => { cx.stop_propagation(); this.copy(url, id, cx); })
+      .child(done ? div().text_size(11).font_semibold().child("✓") : svg("mods/madlen-previews/copy.svg").size(12));
+  }
+
+  // Repo etiketi: grupta aynı repodan birden fazla PR varsa numarayla ayrılır.
+  previewLabel(g, pr) {
+    const same = g.prs.filter((p) => p.repo === pr.repo && !p.merged).length > 1;
+    return repoLabel(pr.repo) + (same ? " #" + pr.number : "");
+  }
+
+  avatar(t, pr, login, state) {
+    const mark = { requested: ["•", t.working, "review bekleniyor"], APPROVED: ["✓", t.done, "onayladı"],
+      CHANGES_REQUESTED: ["✗", t.blocked, "değişiklik istedi"], COMMENTED: ["…", t.muted, "yorum yaptı"],
+      DISMISSED: ["–", t.dim, "review geçersiz"] }[state] ?? ["•", t.dim, String(state).toLowerCase()];
+    return div().id(`av-${this.key(pr)}-${login}`).relative().size(18).flex_none().rounded(9).bg(t.raised)
+      .flex().items_center().justify_center().text_size(8.5).font_semibold().text_color(t.muted).tooltip(login + " · " + mark[2])
+      .child(login.slice(0, 2).toLocaleUpperCase("tr"))
+      .child(div().absolute().right(-3).bottom(-3).size(10).rounded(5).bg(t.surface).flex().items_center().justify_center()
+        .text_size(8).font_semibold().text_color(mark[1]).child(mark[0]));
+  }
+
+  // Küçük işlem düğmesi; onay bekliyorsa vurgulu ve "?" ile biter.
+  pill(t, id, label, action, onClick, { danger = false, tip } = {}) {
+    const armed = this.armed(action);
+    return div().id(id).flex_none().px(8).py(3).rounded(6).text_size(11.5).font_medium().cursor_pointer()
+      .bg(armed ? (danger ? "#dc2626" : t.solid) : t.hover).text_color(armed ? (danger ? "#ffffff" : t.solid_foreground) : t.foreground)
+      .hover((s) => s.bg(armed ? (danger ? "#dc2626" : t.solid) : t.selected))
+      .when(Boolean(tip), (e) => e.tooltip(armed ? "Onaylamak için tekrar tıkla" : tip))
+      .on_click((_e, cx) => { cx.stop_propagation(); onClick(cx); })
+      .child(armed ? label + "?" : label);
+  }
+
+  drawer(t, pr) {
+    const k = this.key(pr);
+    const requested = Object.keys(pr.reviewers ?? {});
+    const members = rankMembers(this.members ?? [], this.groups, this.me);
+    const label = (s) => div().text_size(10.5).font_semibold().text_color(t.dim).child(s);
+    return v_flex().id("dr-" + k).mx(10).mb(8).mt(2).p(10).gap(8).rounded(8).bg(t.background).border(1).border_color(t.border)
+      .child(h_flex().gap(6).items_center()
+        .child(div().flex_1().child(label(pr.draft ? "DURUM · TASLAK" : "DURUM · REVIEW'A HAZIR")))
+        .child(pr.draft
+          ? this.pill(t, "ready-" + k, "Review'a hazır", "ready:" + k, (cx) => this.setDraft(pr, false, cx), { tip: "PR taslaktan çıkar; reviewer'lara bildirim gider" })
+          : this.pill(t, "draft-" + k, "Taslağa çevir", "draft:" + k, (cx) => this.setDraft(pr, true, cx), { tip: "PR taslağa döner" })))
+      .child(label("REVIEWER"))
+      .child(h_flex().flex_wrap().gap(5)
+        .when(!this.members?.length, (e) => e.child(div().text_size(11).text_color(t.dim).child(this.members ? "Üye listesi alınamadı" : "Yükleniyor…")))
+        .children(members.map((login) => {
+          const on = requested.includes(login);
+          return this.pill(t, `rvb-${k}-${login}`, (on ? "× " : "+ ") + login, (on ? "remove:" : "add:") + login + ":" + k,
+            (cx) => this.reviewer(pr, login, !on, cx), { danger: on, tip: on ? "Review isteğini geri çek" : "Reviewer olarak ekle" });
+        })))
+      .when(Boolean(this.sendError[k]), (e) => e.child(div().text_size(11).text_color(t.blocked).child(this.sendError[k])));
+  }
+
+  row(t, pr, first) {
+    const k = this.key(pr);
+    const open = Boolean(this.expanded[k]) && !pr.merged;
+    const toggle = (cx) => { if (pr.merged) return; this.expanded[k] = !open; if (!open) this.loadMembers(cx); cx.notify(); };
+    const reviewers = pr.merged ? [] : Object.entries(pr.reviewers ?? {});
+    return v_flex().id("r-" + k)
+      .child(h_flex().id("rh-" + k).h(32).px(10).gap(7).items_center().when(!first, (e) => e.border_t(1).border_color(t.border))
+        .bg(open ? t.raised : t.surface).when(!pr.merged, (e) => e.cursor_pointer().hover((s) => s.bg(t.raised)))
+        .on_click((_e, cx) => toggle(cx))
+        .child(div().id("st-" + k).w(14).flex_none().tooltip(pr.merged ? "Merge edildi · " + ago(pr.mergedAt).replace(/^(\d.*)$/, "$1 önce") : pr.draft ? "Taslak PR" : "Açık PR")
+          .child(svg(pr.merged ? "mods/madlen-previews/pr-merged.svg" : pr.draft ? "mods/madlen-previews/pr-draft.svg" : "mods/madlen-previews/pr-open.svg").size(13).text_color(pr.merged ? "#a371f7" : pr.draft ? "#8b949e" : "#3fb950")))
+        .child(div().w(60).flex_none().truncate().px(4).py(1).rounded(4).bg(t.raised).text_size(10.5).font_semibold().text_color(t.muted).tooltip(pr.repo).child(repoLabel(pr.repo)))
+        .child(div().id("num-" + k).flex_none().text_size(11.5).text_color(t.dim).cursor_pointer().hover((s) => s.text_color(t.accent)).tooltip("PR'ı GitHub'da aç")
+          .on_click((_e, cx) => { cx.stop_propagation(); this.open(pr.url); }).child("#" + pr.number))
+        .child(div().flex_1().min_w(0).truncate().text_size(12.5).text_color(pr.merged ? t.muted : t.foreground).tooltip(pr.title).child(shortTitle(pr.title)))
+        .children(reviewers.map(([login, state]) => this.avatar(t, pr, login, state)))
+        .when(!pr.merged, (e) => e.child(div().w(16).flex_none().text_size(13).font_semibold().text_color(open ? t.accent : t.dim).child("⋯"))))
+      .when(open, (e) => e.child(this.drawer(t, pr)));
+  }
+
+  previewLine(t, g, pr) {
+    const p = pr.preview, k = this.key(pr), label = this.previewLabel(g, pr);
     const dot = (c) => div().size(7).flex_none().rounded(4).bg(c);
-    const line = (el, text, color) => h_flex().gap(6).items_center().text_size(11.5).text_color(color).child(el).child(div().truncate().child(text));
-    if (this.sending.has(this.key(pr))) return line(svg("mods/madlen-chrome/spinner.svg").size(11).text_color(t.working).spin(900), "Gönderiliyor…", t.working);
+    const spin = () => svg("mods/madlen-chrome/spinner.svg").size(10).flex_none().text_color(t.working).spin(900);
+    const line = (id) => h_flex().id(id).h(22).gap(7).items_center().text_size(11.5);
+    const name = div().w(56).flex_none().truncate().text_color(t.muted).child(label);
+    const when = (s) => div().flex_none().text_size(10.5).text_color(t.dim).child(s);
+    const gap = () => div().flex_1();
+    const link = (url, color, text) => div().id("pl-" + k).flex_initial().min_w(0).truncate().text_color(color).cursor_pointer()
+      .hover((s) => s.text_color(t.foreground)).tooltip(url).on_click((_e, cx) => { cx.stop_propagation(); this.open(url); }).child(text);
+    if (this.busyAction[k]?.startsWith("preview:"))
+      return line("pv-" + k).child(spin()).child(name).child(div().flex_1().text_color(t.working).child("istek gönderiliyor…"));
     switch (p.state) {
-      case "building": return line(svg("mods/madlen-chrome/spinner.svg").size(11).text_color(t.working).spin(900), "Preview kuruluyor · " + ago(p.since), t.working);
-      case "ready": return line(dot(t.done), "Preview hazır · " + ago(p.since), t.done);
-      case "failed": return line(dot(t.blocked), "Preview başarısız · " + ago(p.since), t.blocked);
-      default: return line(dot(t.idle), "Henüz preview alınmadı", t.dim);
+      case "ready":
+        return line("pv-" + k).child(dot(t.done)).child(name).child(link(p.url, t.accent, previewHost(p.url) + " ↗")).child(this.copyButton(t, "cp-" + k, p.url)).child(gap()).child(when(ago(p.since)));
+      case "building":
+        return line("pv-" + k).child(spin()).child(name)
+          .child(p.lastUrl ? link(p.lastUrl, t.dim, "kuruluyor · önceki: " + previewHost(p.lastUrl) + " ↗") : div().flex_1().text_color(t.working).child("kuruluyor…"))
+          .when(Boolean(p.lastUrl), (e) => e.child(this.copyButton(t, "cp-" + k, p.lastUrl)))
+          .child(gap()).child(when(ago(p.since)));
+      case "failed":
+        return line("pv-" + k).child(dot(t.blocked)).child(name)
+          .child(p.lastUrl ? link(p.lastUrl, t.dim, previewHost(p.lastUrl) + " ↗") : div().flex_1().text_color(t.dim).child("çalışan preview yok"))
+          .when(Boolean(p.lastUrl), (e) => e.child(this.copyButton(t, "cp-" + k, p.lastUrl)))
+          .child(gap())
+          .when(Boolean(p.run), (e) => e.child(div().id("pr-run-" + k).flex_none().px(5).rounded(4).text_size(10.5).text_color(t.blocked).cursor_pointer()
+            .hover((s) => s.bg(t.hover)).tooltip("Hata veren çalışmayı aç").on_click((_e, cx) => { cx.stop_propagation(); this.open(p.run); }).child("hata")))
+          .child(when(ago(p.since)));
+      default:
+        return line("pv-" + k).child(dot(t.idle)).child(name).child(div().flex_1().text_color(t.dim).child("henüz preview alınmadı"));
     }
   }
 
-  row(t, pr) {
-    const k = this.key(pr);
-    const confirming = this.confirm?.key === k && Date.now() - this.confirm.at <= CONFIRM_MS;
-    const busy = this.sending.has(k) || pr.preview.state === "building";
-    const p = pr.preview;
-    return v_flex().id("pr-" + k).gap(5).px(10).py(8).rounded(8).bg(t.surface).border(1).border_color(t.border)
-      .child(h_flex().gap(6).items_center()
-        .child(div().id("st-" + k).flex_none().tooltip(pr.merged ? "Merge edildi · " + ago(pr.mergedAt).replace(/^(\d.*)$/, "$1 önce") : pr.draft ? "Taslak PR" : "Açık PR").child(svg(pr.merged ? "mods/madlen-previews/pr-merged.svg" : pr.draft ? "mods/madlen-previews/pr-draft.svg" : "mods/madlen-previews/pr-open.svg").size(13).text_color(pr.merged ? "#a371f7" : pr.draft ? "#8b949e" : "#3fb950")))
-        .child(div().flex_none().px(6).py(1).rounded(4).bg(t.raised).text_size(10.5).font_semibold().text_color(t.muted).child(repoLabel(pr.repo)))
-        .child(div().id("num-" + k).flex_none().text_size(12).text_color(t.dim).cursor_pointer().hover((s) => s.text_color(t.accent)).tooltip("PR'ı aç").on_click(() => this.open(pr.url)).child("#" + pr.number))
-        .child(div().flex_1().min_w(0).truncate().text_size(12.5).text_color(t.foreground).tooltip(pr.title).child(pr.title)))
-      .when(canPreview(pr.repo) && !pr.merged, (e) => e.child(h_flex().gap(6).items_center()
-        .child(div().flex_1().min_w(0).child(this.status(t, pr)))
-        .when(Boolean(p.url ?? p.lastUrl), (e) => e.child(this.link(t, "open-" + k, p.state === "ready" ? "Aç" : "Son preview", p.url ?? p.lastUrl)))
-        .when(p.state === "failed" && Boolean(p.run), (e) => e.child(this.link(t, "run-" + k, "Hata", p.run)))
-        .child(div().id("req-" + k).flex_none().px(9).py(3).rounded(6).text_size(11.5).font_medium().cursor_pointer()
-          .bg(confirming ? t.solid : t.hover).text_color(confirming ? t.solid_foreground : busy ? t.dim : t.foreground)
-          .hover((s) => s.bg(confirming ? t.solid : t.selected))
-          .tooltip(confirming ? "Tekrar tıklayınca PR'a `" + TRIGGER + "` yazılır" : busy ? "Preview zaten kuruluyor; yine de yeniden alabilirsin" : "Bu PR için preview al")
-          .on_click((_e, cx) => { cx.stop_propagation(); this.request(pr, cx); })
-          .child(confirming ? "Gönder?" : "Preview al"))))
-      .when(Boolean(this.sendError[k]), (e) => e.child(div().text_size(11).text_color(t.blocked).child(this.sendError[k])));
+  strip(t, g, prs) {
+    const open = Boolean(this.menu[g.key]);
+    return v_flex().id("sp-" + g.key).px(10).pt(6).pb(8).gap(2).border_t(1).border_color(t.border).bg(t.background)
+      .child(h_flex().h(22).items_center()
+        .child(div().flex_1().text_size(10.5).font_semibold().text_color(t.dim).child("PREVIEW"))
+        .child(div().id("pm-" + g.key).flex_none().px(8).py(2).rounded(6).text_size(11).font_medium().cursor_pointer()
+          .bg(open ? t.selected : t.hover).text_color(open ? t.accent : t.foreground).hover((s) => s.bg(t.selected))
+          .on_click((_e, cx) => { cx.stop_propagation(); this.menu[g.key] = !open; cx.notify(); })
+          .child(open ? "Preview al ▴" : "Preview al ▾")))
+      .children(prs.map((pr) => this.previewLine(t, g, pr)))
+      .when(open, (e) => e.child(v_flex().mt(6).pt(6).gap(4).border_t(1).border_color(t.border).children(prs.map((pr) => {
+        const k = this.key(pr);
+        return v_flex().gap(2)
+          .child(h_flex().gap(8).items_center()
+            .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.muted).child(this.previewLabel(g, pr) + " · #" + pr.number + " · " + shortTitle(pr.title)))
+            .child(this.pill(t, "req-" + k, "Preview al", "preview:" + k, (cx) => this.request(pr, cx), { tip: "PR'a `" + TRIGGER + "` yazar" })))
+          .when(Boolean(this.sendError[k]) && !this.expanded[k], (e) => e.child(div().text_size(11).text_color(t.blocked).child(this.sendError[k])));
+      }))));
+  }
+
+  card(t, g) {
+    const prs = this.showMerged ? g.prs : g.prs.filter((p) => !p.merged);
+    const previewable = prs.filter((p) => canPreview(p.repo) && !p.merged);
+    const title = this.titles[g.key];
+    const linkable = g.key.startsWith("MAD-") && Boolean(this.linear?.url);
+    return v_flex().id("c-" + g.key).rounded(9).overflow_hidden().bg(t.surface).border(1).border_color(t.border)
+      .child(h_flex().id("ch-" + g.key).px(10).pt(8).pb(6).gap(6).items_center().min_w(0)
+        .when(linkable, (e) => e.cursor_pointer().hover((s) => s.opacity(0.8)).tooltip(title ? g.key + " · " + title : "Linear'da aç").on_click(() => this.open(this.linear.url + g.key)))
+        .child(div().flex_none().text_size(11).font_semibold().text_color(t.dim).child(g.key))
+        .when(Boolean(title), (e) => e.child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.muted).child(title))))
+      .child(v_flex().border_t(1).border_color(t.border).children(prs.map((pr, i) => this.row(t, pr, i === 0))))
+      .when(previewable.length > 0, (e) => e.child(this.strip(t, g, previewable)));
   }
 
   render() {
     const t = theme();
-    const groups = (this.groups ?? []).map((g) => this.showMerged ? g : { ...g, prs: g.prs.filter((p) => !p.merged) }).filter((g) => g.prs.length);
+    const groups = (this.groups ?? []).filter((g) => this.showMerged || g.prs.some((p) => !p.merged));
     const seg = (id, label, on, value) => div().id(id).px(8).py(2).rounded(5).text_size(11).cursor_pointer()
       .bg(on ? t.surface : t.hover).text_color(on ? t.accent : t.muted).hover((s) => s.text_color(t.foreground))
       .on_click((_e, cx) => { this.showMerged = value; try { localStorage.setItem("showMerged", value ? "1" : "0"); } catch {} cx.notify(); })
       .child(label);
+    const icon = (id, tip, child, onClick) => div().id(id).flex_none().p(5).rounded(6).text_color(t.dim).cursor_pointer().tooltip(tip)
+      .hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click((_e, cx) => onClick(cx)).child(child);
     return v_flex().id("previews-root").size_full().bg(t.chrome).font_family("Helvetica Neue")
-      .child(h_flex().flex_none().h(44).px(14).gap(8).items_center().border_b(1).border_color(t.border)
+      .child(h_flex().flex_none().h(40).pl(14).pr(6).gap(6).items_center().border_b(1).border_color(t.border)
         .child(div().text_size(13).font_semibold().text_color(t.foreground).child("PR'lar"))
-        .child(div().flex_1().truncate().text_size(11).text_color(t.dim).child(this.loading ? "Yenileniyor…" : this.fetchedAt ? "Güncellendi · " + ago(this.fetchedAt) : ""))
+        .child(div().flex_1().truncate().text_size(11).text_color(t.dim).child(this.loading ? "yenileniyor…" : this.fetchedAt ? ago(this.fetchedAt) : ""))
         .child(h_flex().flex_none().p(2).gap(2).rounded(7).bg(t.hover)
           .child(seg("f-open", "Açık", !this.showMerged, false))
           .child(seg("f-all", "Hepsi", this.showMerged, true)))
-        .child(div().id("previews-refresh").px(8).py(3).rounded(6).text_size(11.5).text_color(t.muted).cursor_pointer().hover((s) => s.bg(t.hover))
-          .on_click((_e, cx) => this.refresh(cx)).child("Yenile")))
+        .child(icon("previews-refresh", "Yenile", this.loading ? svg("mods/madlen-chrome/spinner.svg").size(13).spin(900) : div().text_size(14).child("↻"), (cx) => this.refresh(cx)))
+        .child(icon("previews-close", "Paneli kapat", div().text_size(13).child("✕"), () => run("layout.hide", { id: "panel" }))))
       .when(Boolean(this.error), (e) => e.child(div().flex_none().m(10).p(10).rounded(8).bg(t.blocked + "22").text_size(11.5).text_color(t.blocked).child("GitHub okunamadı: " + this.error)))
-      .child(v_flex().id("previews-list").flex_1().min_h(0).overflow_y_scrollbar().px(10).py(10).gap(14)
+      .child(v_flex().id("previews-list").flex_1().min_h(0).overflow_y_scrollbar().px(10).py(10).gap(10)
         .when(!this.groups && !this.error, (e) => e.child(div().text_size(12).text_color(t.dim).child("PR'lar yükleniyor…")))
         .when(Boolean(this.groups) && !groups.length, (e) => e.child(div().text_size(12).text_color(t.dim).child("Açık PR'ın yok.")))
-        .children(groups.map((g) => v_flex().id("g-" + g.key).gap(6)
-          .child(h_flex().id("gh-" + g.key).px(2).gap(6).items_center().min_w(0)
-            .when(g.key.startsWith("MAD-") && Boolean(this.linear?.url), (e) => e.cursor_pointer().hover((s) => s.opacity(0.8)).tooltip(this.titles[g.key] ? g.key + " · " + this.titles[g.key] : "Linear'da aç").on_click(() => this.open(this.linear.url + g.key)))
-            .child(div().flex_none().text_size(11).font_semibold().text_color(t.dim).child(g.key))
-            .when(Boolean(this.titles[g.key]), (e) => e.child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.muted).child(this.titles[g.key]))))
-          .children(g.prs.map((pr) => this.row(t, pr))))));
+        .children(groups.map((g) => this.card(t, g))));
   }
 }
