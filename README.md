@@ -47,6 +47,10 @@ Bu seçenek ayrıca `outputs-browser` modunu ve `~/.local/share/herdr-outputs/He
 - Chat ana çalışma alanını kaplar; her split içinde ayrı Chat bulunmaz. Terminal’e dönünce mevcut bölmeler korunur. Herdr’a bağlı uzak makinelerde Chat desteklenir; uzak makinede Python 3.9+ gerekir. Kayıtlar o makinede okunur, metin mesajları tam makine/terminal adresine gönderilir. Uzak oturuma panodan görsel gönderme henüz desteklenmez.
 - Codex yerel veritabanı / Claude kayıt biçimleri resmi kararlı bir entegrasyon sözleşmesi değildir; sağlayıcı güncellemeleri uyarlama gerektirebilir. Eşleşme belirsizse başka bir sohbet tahmin edilmez.
 
+## PR'lar paneli
+
+Sol menüdeki **PR'lar**, madlenio'daki açık PR'larını (ve "Hepsi" seçiliyken son 7 günde merge edilenleri) Linear numarasına göre gruplar. API, Teacher ve Exam PR'larında son preview'in durumu ve linki görünür; **Preview al** iki tıklamayla o PR'a `@madlen-agent deploy` yorumu yazar, kendiliğinden hiçbir şey göndermez. GitHub'a kendi `gh` oturumunla bağlanır ve dakikada bir yenilenir. Linear eklentisinde oturum açıksa issue başlıkları da gösterilir.
+
 ## Güncelleme ve geri dönüş
 
 Yeni sürüm etiketini indirip aynı `install.py` dosyasını çalıştırın. Paket dosyalarını kendiniz değiştirdiyseniz kurulum durur. Değişiklikleri inceledikten sonra `--replace-modified` ile yedekleyerek güncelleyebilirsiniz. Yedekler `HERDR_APP_HOME/backups/herdr-madlen-studio/` altında tutulur.
@@ -65,6 +69,7 @@ Herdr’ın resmi eklentisi değildir. Madlen marka varlıkları ve üçüncü t
 python3 -m unittest discover -s tests
 python3 -m unittest discover -s theme/mods/madlen-chat -p 'test_*.py'
 node test-chat-state.cjs
+node test-previews.mjs
 ```
 
 Node yalnızca arayüz durum testinde gerekir; kullanıcı kurulumu Python ile çalışır. Kurulum testleri geçici klasörlerde çalışır ve gerçek Herdr ayarlarını değiştirmez.

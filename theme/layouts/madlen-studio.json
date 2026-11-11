@@ -24,7 +24,7 @@
             "mod": "madlen-nav"
           },
           "size": {
-            "px": 192
+            "px": 238
           }
         },
         {
@@ -211,6 +211,13 @@
                       "type": "block",
                       "content": {
                         "mod": "changes"
+                      }
+                    },
+                    {
+                      "id": "previews",
+                      "type": "block",
+                      "content": {
+                        "mod": "madlen-previews"
                       }
                     }
                   ],
