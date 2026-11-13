@@ -144,6 +144,31 @@ class BridgeTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'artık yok'):bridge.answer('t1',fp,"9")
             self.assertEqual(bridge.answer('t1',fp,"1"),{'ok':True})
         self.assertEqual([c for c in run.calls if c[:2]==['hc','keys']],[['hc','keys','t1','1']])
+    def test_context_usage_matches_status_line(self):
+        usage=lambda n:{'input_tokens':2,'cache_creation_input_tokens':n,'cache_read_input_tokens':1000,'output_tokens':900}
+        rows=[{'type':'assistant','message':{'model':'claude-opus-5-5','usage':usage(98)}},
+              {'type':'assistant','isSidechain':True,'message':{'model':'claude-haiku-4-5-20251001','usage':usage(50000)}},
+              {'type':'assistant','message':{'model':'<synthetic>','usage':usage(0)}},
+              {'type':'user','message':{'role':'user','content':'devam'}}]
+        with tempfile.TemporaryDirectory() as d:
+            home=Path(d);catalog=home/'.claude/cache/model-catalog';catalog.mkdir(parents=True)
+            (catalog/'org-acct-cc.json').write_text(json.dumps({'catalog':{'config':{'models':[{'id':'claude-opus-5-5','runtime':{'max_input_tokens':1000000}},{'id':'claude-haiku-4-5-20251001','runtime':{'max_input_tokens':200000}}]}}}))
+            (catalog/'broken-cc.json').write_text('{')
+            log=home/'s.jsonl'
+            with patch.object(bridge.Path,'home',return_value=home):
+                log.write_text('\n'.join(map(json.dumps,rows)))
+                self.assertEqual(bridge.context_usage(log),{'tokens':1100,'window':1000000,'percent':0})
+                rows[0]['message']['usage']=usage(139000)
+                log.write_text('\n'.join(map(json.dumps,rows)))
+                self.assertEqual(bridge.context_usage(log),{'tokens':140002,'window':1000000,'percent':14})
+                rows.append({'type':'system','subtype':'compact_boundary','compactMetadata':{'trigger':'manual','preTokens':140002,'postTokens':19738}})
+                log.write_text('\n'.join(map(json.dumps,rows)))
+                self.assertEqual(bridge.context_usage(log),{'tokens':19738,'window':1000000,'percent':2})
+                rows[0]['message']['model']='unlisted-model'
+                log.write_text('\n'.join(map(json.dumps,rows)))
+                self.assertEqual(bridge.context_usage(log),{'tokens':19738,'window':None,'percent':None})
+                log.write_text(json.dumps({'type':'user','message':{'role':'user','content':'merhaba'}}))
+                self.assertIsNone(bridge.context_usage(log))
     def test_limit_reads_only_the_newest_messages(self):
         with tempfile.TemporaryDirectory() as d:
             p=Path(d)/'test.jsonl'

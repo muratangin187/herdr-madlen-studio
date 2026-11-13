@@ -134,6 +134,14 @@ export default class MadlenChat extends View {
       finally{this.answering=false;this.refresh(cx,true);cx.notify();}
     });
   }
+  // Same count as Claude Code's status line (context_window.used_percentage).
+  contextMeter(c,t){
+    const n=v=>String(v).replace(/\B(?=(\d{3})+(?!\d))/g,'.'), pct=c.percent, known=pct!=null, full=known&&pct>=80;
+    return h_flex().id('chat-context').flex_none().gap(7).items_center().text_size(12).text_color(full?t.blocked:t.muted)
+      .tooltip(known?`Bağlam: ${n(c.tokens)} / ${n(c.window)} token`:`Bağlam: ${n(c.tokens)} token · pencere boyutu bilinmiyor`)
+      .when(known,e=>e.child(div().w(40).h(5).rounded_full().bg(t.border).overflow_hidden().child(div().h(5).w(Math.max(2,Math.round(pct*0.4))).rounded_full().bg(full?t.blocked:t.accent))))
+      .child(known?`Bağlam %${pct}`:`Bağlam ${Math.round(c.tokens/1000)}k token`);
+  }
   notice(m,t){return h_flex().id(`notice-${m.id}`).flex_none().w_full().max_w(this.columnWidth()).pl(40).gap(10).items_center().text_size(12).text_color(t.dim)
     .child(div().h(1).w(18).flex_none().bg(t.border)).child(div().min_w(0).child(m.text)).child(div().h(1).flex_1().min_w(12).bg(t.border));}
   pasteImages(cx,paths=[]) {
@@ -241,6 +249,7 @@ export default class MadlenChat extends View {
       .child(h_flex().h(42).flex_none().px(16).gap(10).items_center().bg(t.chrome).border_b(1).border_color(t.border)
         .child(div().font_medium().child(`${data?.kind==='claude'?'Claude Code':'Codex'} · Sohbet`))
         .child(div().flex_1().truncate().text_size(12).text_color(status==='working'?t.working:status==='blocked'?t.blocked:t.done).child(status==='working'?'● Çalışıyor…':status==='blocked'?'● Yanıtınızı bekliyor':['idle','done'].includes(status)?'✓ Yanıt tamamlandı · Yeni mesaj gönderebilirsiniz':'Oturum bağlanıyor…'))
+        .when(Boolean(data?.context),e=>e.child(this.contextMeter(data.context,t)))
         .when(!this.follow&&this.maxOffset()-this.offset>3,e=>e.child(this.button('chat-latest','Son mesaj ↓',cx=>{this.follow=true;this.offset=this.maxOffset();cx.notify();})))
         .child(this.button('chat-refresh','Yenile',cx=>this.refresh(cx)))
         .child(h_flex().p(3).gap(2).rounded(8).bg(t.hover).child(div().px(10).py(4).rounded(6).bg(t.surface).text_color(t.accent).child('Chat')).child(this.button('back-terminal','Terminal',()=>this.back())))

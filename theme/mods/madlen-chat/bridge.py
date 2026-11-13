@@ -251,6 +251,37 @@ def answer(address,fingerprint,key):
     return dict(ok=True)
 
 
+def context_window(model):
+    """Claude Code caches its account's model catalog; each model lists its context window."""
+    folder=Path.home()/'.claude/cache/model-catalog'
+    newest=lambda pattern:sorted(folder.glob(pattern),key=lambda p:p.stat().st_mtime,reverse=True)
+    for path in newest('*-cc.json')+newest('*-ccd.json'):
+        try:models=json.loads(path.read_text())['catalog']['config']['models']
+        except (OSError,ValueError,KeyError,TypeError):continue
+        for m in models if isinstance(models,list) else []:
+            window=(m.get('runtime') or {}).get('max_input_tokens') if isinstance(m,dict) and m.get('id')==model else None
+            if isinstance(window,int) and window>0:return window
+    return None
+
+
+def context_usage(path):
+    """Context the next request starts from, counted like the status line's used_percentage."""
+    tokens=model=None
+    for i,r in enumerate(b.reverse_json(path)):
+        if i>=2000:break
+        if r.get('isSidechain'):continue
+        if tokens is None and r.get('type')=='system' and r.get('subtype')=='compact_boundary':
+            post=(r.get('compactMetadata') or {}).get('postTokens')
+            if isinstance(post,int):tokens=post
+        m=r.get('message') if r.get('type')=='assistant' else None
+        if not isinstance(m,dict) or not m.get('model') or m.get('model')=='<synthetic>' or not isinstance(m.get('usage'),dict):continue
+        if tokens is None:tokens=sum(m['usage'].get(k) or 0 for k in ('input_tokens','cache_creation_input_tokens','cache_read_input_tokens'))
+        model=m['model'];break
+    if not tokens or not model:return None
+    window=context_window(model)
+    return dict(tokens=tokens,window=window,percent=min(100,round(100*tokens/window)) if window else None)
+
+
 def snapshot(address,limit=None):
     if "/" in address:
         import remote
@@ -259,7 +290,8 @@ def snapshot(address,limit=None):
     messages,more=projected(sid,limit) if projection else read_records(path,kind,limit)
     status=(t.get('status') or {}).get('state','idle')
     prompt=permission_prompt(address,t) if kind=='claude' else None
-    return dict(terminal=address,session=sid,kind=kind,status=status,messages=messages,more=more,prompt=prompt)
+    context=context_usage(path) if kind=='claude' and not projection else None
+    return dict(terminal=address,session=sid,kind=kind,status=status,messages=messages,more=more,prompt=prompt,context=context)
 
 
 def send(address,expected,text,attachments=None):
