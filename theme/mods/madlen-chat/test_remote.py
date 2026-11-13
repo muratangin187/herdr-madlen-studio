@@ -25,6 +25,10 @@ class RemoteTests(unittest.TestCase):
             data=json.loads(result.stdout)
             self.assertEqual(data['session'],sid)
             self.assertEqual(data['messages'][0]['text'],'Remote fixture response')
+    def test_remote_snapshot_hides_permission_prompt(self):
+        response=SimpleNamespace(returncode=0,stdout=json.dumps({'session':'s','status':'blocked','messages':[],'prompt':{'title':'Bash command'}}))
+        with patch.object(bridge,'terminal',return_value=({'status':{'state':'blocked','kind':'permission'}},'claude',42)),patch.object(bridge.b,'run',return_value=SimpleNamespace(returncode=0,stdout='{"text":""}')),patch.object(remote.subprocess,'run',return_value=response):
+            self.assertNotIn('prompt',remote.snapshot('mbp/t1'))
     def test_send_targets_full_remote_address(self):
         data={'session':'s','status':'idle','process_pid':42}
         terminal=({'status':{'state':'idle'}},'claude',42)

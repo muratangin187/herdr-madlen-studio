@@ -126,6 +126,24 @@ class BridgeTests(unittest.TestCase):
         with patch.object(bridge,'resolve',return_value=({'status':{'state':'working'}},'codex','s',Path('/tmp'),True)),patch.object(bridge.b,'run') as run:
             with self.assertRaisesRegex(ValueError,'Agent çalışıyor'):bridge.send('t1','s','hello')
             run.assert_not_called()
+    SCREEN='\n'.join(['❯ Bash ile şu komutu çalıştır','  ⎿  $ touch a.txt','─'*60,' Bash command',' Tip: auto mode handles these prompts for you',' Create empty file a.txt',' '+'╌'*60,' touch a.txt',' '+'╌'*60,
+                       ' Do you want to proceed?',' ❯ 1. Yes','   2. Yes, and always allow access to /tmp/x','      from this project','   3. No',' Esc to cancel · Tab to amend'])
+    def test_permission_dialog_is_parsed(self):
+        p=bridge.parse_prompt(self.SCREEN)
+        self.assertEqual((p['title'],p['lines'],p['code'],p['question']),('Bash command',['Create empty file a.txt'],['touch a.txt'],'Do you want to proceed?'))
+        self.assertEqual(p['options'],[{'key':'1','label':'Yes'},{'key':'2','label':'Yes, and always allow access to /tmp/x from this project'},{'key':'3','label':'No'}])
+        self.assertIsNone(bridge.parse_prompt('just output\n'+'─'*60+'\n❯ '))
+    def test_answer_presses_key_only_for_the_same_dialog(self):
+        t={'status':{'state':'blocked','kind':'permission'},'foreground':{'name':'claude','pid':1}}
+        fp=bridge.parse_prompt(self.SCREEN)['fingerprint']
+        def run(args):
+            r=type('R',(),{})();r.returncode=0;r.stdout=json.dumps({'text':self.SCREEN}) if args[:2]==['hc','read'] else '{}';run.calls.append(args);return r
+        run.calls=[]
+        with patch.object(bridge,'terminal',return_value=(t,'claude',1)),patch.object(bridge.b,'run',side_effect=run):
+            with self.assertRaisesRegex(ValueError,'değişti'):bridge.answer('t1','stale',"1")
+            with self.assertRaisesRegex(ValueError,'artık yok'):bridge.answer('t1',fp,"9")
+            self.assertEqual(bridge.answer('t1',fp,"1"),{'ok':True})
+        self.assertEqual([c for c in run.calls if c[:2]==['hc','keys']],[['hc','keys','t1','1']])
     def test_limit_reads_only_the_newest_messages(self):
         with tempfile.TemporaryDirectory() as d:
             p=Path(d)/'test.jsonl'

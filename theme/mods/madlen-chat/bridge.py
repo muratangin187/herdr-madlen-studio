@@ -1,5 +1,6 @@
 """Local, read-only transcript adapter; sending always targets the verified live TUI."""
 import argparse
+import hashlib
 from html import unescape
 import json
 from pathlib import Path
@@ -205,6 +206,51 @@ def records(path,kind,limit=None):
     return read_records(path,kind,limit)[0]
 
 
+RULE=re.compile(r'^[─━]{20,}$')
+DASHES=re.compile(r'^[╌┄-]{20,}$')
+OPTION=re.compile(r'^(?:❯\s*)?(\d)\.\s+(.*)$')
+
+
+def parse_prompt(screen,summary=''):
+    """Claude Code's permission dialog sits under the last full-width rule of the screen."""
+    lines=[l.strip() for l in screen.splitlines()]
+    rules=[i for i,l in enumerate(lines) if RULE.match(l)]
+    if not rules:return None
+    text=[];code=[];options=[];inside=False
+    for l in lines[rules[-1]+1:]:
+        if DASHES.match(l):inside=not inside;continue
+        if not l or l.startswith('Tip:'):continue
+        if l.startswith('Esc to cancel'):break
+        match=OPTION.match(l)
+        if match:options.append(dict(key=match.group(1),label=match.group(2)));continue
+        if options:options[-1]['label']+=' '+l;continue
+        (code if inside else text).append(l)
+    if not options or not text:return None
+    title,text=text[0],text[1:]
+    question=text.pop() if text and text[-1].endswith('?') else ''
+    fingerprint=hashlib.sha256(json.dumps([title,text,code,question,options],ensure_ascii=False).encode()).hexdigest()[:16]
+    return dict(title=title,lines=text,code=code,question=question,options=options,summary=summary,fingerprint=fingerprint)
+
+
+def permission_prompt(address,t):
+    status=t.get('status') or {}
+    if status.get('state')!='blocked' or status.get('kind')!='permission':return None
+    r=b.run(['hc','read',address,'--lines','0','--json'])
+    return parse_prompt(json.loads(r.stdout).get('text',''),status.get('msg','')) if r.returncode==0 else None
+
+
+def answer(address,fingerprint,key):
+    """Press one option of the dialog the person saw, only while that same dialog is on screen."""
+    if '/' in address:raise ValueError('Uzak oturumlarda izinleri Terminal görünümünden yanıtlayın.')
+    t,kind,pid=terminal(address)
+    prompt=permission_prompt(address,t) if kind=='claude' else None
+    if not prompt or prompt['fingerprint']!=fingerprint:raise ValueError('İzin isteği değişti; sohbet yenileniyor, tekrar bakın.')
+    if key not in [o['key'] for o in prompt['options']]:raise ValueError('Bu seçenek artık yok.')
+    r=b.run(['hc','keys',address,key])
+    if r.returncode:raise ValueError('Yanıt terminale iletilemedi. Terminal görünümünden devam edin.')
+    return dict(ok=True)
+
+
 def snapshot(address,limit=None):
     if "/" in address:
         import remote
@@ -212,7 +258,8 @@ def snapshot(address,limit=None):
     t,kind,sid,path,projection=resolve(address)
     messages,more=projected(sid,limit) if projection else read_records(path,kind,limit)
     status=(t.get('status') or {}).get('state','idle')
-    return dict(terminal=address,session=sid,kind=kind,status=status,messages=messages,more=more)
+    prompt=permission_prompt(address,t) if kind=='claude' else None
+    return dict(terminal=address,session=sid,kind=kind,status=status,messages=messages,more=more,prompt=prompt)
 
 
 def send(address,expected,text,attachments=None):
@@ -282,9 +329,10 @@ def send(address,expected,text,attachments=None):
 
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--terminal',required=True);p.add_argument('--session');p.add_argument('--text');p.add_argument('--attachments');p.add_argument('--limit',type=int);a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--terminal',required=True);p.add_argument('--session');p.add_argument('--text');p.add_argument('--attachments');p.add_argument('--limit',type=int);p.add_argument('--answer');p.add_argument('--fingerprint');a=p.parse_args()
     try:
-        result=send(a.terminal,a.session,a.text,json.loads(a.attachments) if a.attachments else None) if a.text is not None else snapshot(a.terminal,a.limit)
+        result=(answer(a.terminal,a.fingerprint,a.answer) if a.answer is not None
+                else send(a.terminal,a.session,a.text,json.loads(a.attachments) if a.attachments else None) if a.text is not None else snapshot(a.terminal,a.limit))
         print(json.dumps(result,ensure_ascii=False))
     except Exception as e:
         print(json.dumps(dict(error=str(e)),ensure_ascii=False));return 1

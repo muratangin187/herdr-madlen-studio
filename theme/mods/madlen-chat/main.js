@@ -9,7 +9,7 @@ const find=(n,id)=>n?.id===id?n:(n?.children??[]).map(c=>find(c,id)).find(Boolea
 export default class MadlenChat extends View {
   init(_props,cx) {
     this.previewWidth=800;this.previewHeight=600;if(props()?.preview)return;
-    this.imageDrafts={};this.pasting=false;this.staged={};this.limits={};this.raw=new Map();this.anchor=null;this.reload=new Set();
+    this.imageDrafts={};this.pasting=false;this.staged={};this.limits={};this.raw=new Map();this.anchor=null;this.reload=new Set();this.answering=false;
     this.dragging=false;this.offset=0;this.viewport=400;this.viewportWidth=1000;this.contentHeight=400;this.follow=true;this.historyKey=0;this.data=null;this.error='';this.sendError='';this.pending=new Set();this.cache=new Map();this.positions=new Map();this.sending=false;this.expanded={};this.drafts={};this.target=null;
     this.input=TextareaState.new({placeholder:'Mesajınızı yazın…',rows:3});
     this.input.set_auto_grow(3,10);
@@ -109,6 +109,30 @@ export default class MadlenChat extends View {
         .when(!m.text&&!m.error,e=>e.child(div().text_color(t.dim).child('Çıktı yok')))
         .when(lines.length>SHELL_LINES,e=>e.child(div().id(`toggle-${id}`).font_family('Helvetica Neue').text_size(12).text_color(t.dim).cursor_pointer().hover(s=>s.text_color(t.muted))
           .on_click((_e,cx)=>{this.follow=false;this.expanded[id]=!open;cx.notify();}).child(open?'▾ Daralt':`▸ ${hidden} satır daha`))));
+  }
+  // Claude Code is blocked on a permission dialog: show it here and press the chosen option's key.
+  permission(p,t){
+    return v_flex().id('permission-card').flex_none().ml(40).w_full().max_w(this.columnWidth()-40).p(18).gap(12).rounded(18).border(1).border_color(t.blocked+'88').bg(t.surface)
+      .child(h_flex().justify_between().items_center().child(div().font_semibold().text_size(12).text_color(t.blocked).child('İZİN İSTİYOR')).child(div().text_size(12).text_color(t.dim).child(p.title)))
+      .children(p.lines.map(l=>div().text_color(t.muted).child(l)))
+      .when(p.code.length>0,e=>e.child(div().p(12).rounded(10).bg(t.background).font_family(this.mono()).text_size(13).text_color(t.foreground).child(p.code.join('\n'))))
+      .when(Boolean(p.question),e=>e.child(div().font_medium().child(p.question)))
+      .child(v_flex().gap(6).children(p.options.map((o,i)=>h_flex().id(`permission-${o.key}`).px(12).py(9).gap(10).items_start().rounded(10).border(1).border_color(i===0?t.accent+'66':t.border).bg(i===0?t.selected:t.canvas)
+        .cursor_pointer().hover(s=>s.bg(t.hover)).on_click((_e,cx)=>this.answer(o.key,cx))
+        .child(div().flex_none().w(16).text_color(t.dim).child(o.key)).child(div().min_w(0).flex_1().child(o.label)))))
+      .child(h_flex().gap(10).justify_between().items_center().child(div().min_w(0).text_size(12).text_color(t.dim).child(this.answering?'Yanıt iletiliyor…':'Seçimin terminaldeki izin penceresine iletilir.'))
+        .child(this.button('permission-terminal','Terminalde aç →',()=>this.back())));
+  }
+  answer(key,cx){
+    const target=this.target,p=this.data?.prompt;if(!target||!p||this.answering)return;
+    this.answering=true;this.sendError='';cx.notify();
+    cx.spawn(async cx=>{
+      try{
+        const r=await exec('/usr/bin/python3',[`${appHome()}/mods/madlen-chat/bridge.py`,'--terminal',target.terminal,'--answer',key,'--fingerprint',p.fingerprint],{timeout:20000});
+        const result=JSON.parse(r.stdout);if(result.error)throw new Error(result.error);
+      }catch(e){if(this.target?.terminal===target.terminal)this.sendError=String(e.message??e);}
+      finally{this.answering=false;this.refresh(cx,true);cx.notify();}
+    });
   }
   notice(m,t){return h_flex().id(`notice-${m.id}`).flex_none().w_full().max_w(this.columnWidth()).pl(40).gap(10).items_center().text_size(12).text_color(t.dim)
     .child(div().h(1).w(18).flex_none().bg(t.border)).child(div().min_w(0).child(m.text)).child(div().h(1).flex_1().min_w(12).bg(t.border));}
@@ -235,6 +259,7 @@ export default class MadlenChat extends View {
           .when(!data,e=>e.child(div().text_color(t.dim).child(!target?'Bu sekmede desteklenen bir sohbet yok. Terminal görünümünü açabilirsiniz.':this.error?'Terminal oturumunuz çalışmaya devam ediyor.':'Sohbet yükleniyor…')))
           .when(Boolean(data?.more),e=>e.child(h_flex().w_full().max_w(this.columnWidth()).justify_center().child(this.button('chat-older',this.pending.has(target?.terminal)?'Yükleniyor…':'Daha eski mesajları göster',cx=>this.older(cx)))))
           .children(groups.map(m=>m.role==='tools'?this.tools(m,t):m.role==='question'?this.question(m,t):m.role==='notice'?this.notice(m,t):m.role==='shell'?this.shell(m,t):this.message(m,t)))
+          .when(Boolean(data?.prompt)&&status==='blocked',e=>e.child(this.permission(data.prompt,t)))
           .child(h_flex().flex_none().pl(40).gap(8).items_center().text_size(12).text_color(status==='working'?t.working:status==='blocked'?t.blocked:t.done)
             .when(status==='working',e=>e.child(svg('mods/madlen-chrome/spinner.svg').size(12).spin(900)))
             .child(div().child(status==='working'?'Yanıt hazırlanıyor…':status==='blocked'?'Devam etmek için yanıtınız gerekiyor.':['idle','done'].includes(status)?'✓ Yanıt tamamlandı':'Oturum bağlanıyor…'))))
@@ -247,7 +272,7 @@ export default class MadlenChat extends View {
         .child(Textarea.new(this.input).w_full().min_w(0).flex_none().text_size(shell?14:15).text_color(t.foreground).when(shell,e=>e.font_family(this.mono())))
         .child(h_flex().gap(10).items_center()
           .when(shell,e=>e.child(div().flex_none().px(7).py(2).rounded(6).bg(t.accent+'26').text_color(t.accent).font_semibold().text_size(11).child('! KOMUT')))
-          .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(shell?t.muted:t.dim).child(shell&&ready?'Claude Code bu satırı kabukta çalıştırır · çıktı sohbete düşer':ready&&queue?'Agent çalışıyor · gönderirsen sıraya girer, bir sonraki adımda okur':ready?'Enter gönderir · Shift+Enter yeni satır':status==='working'?'Agent çalışıyor. Taslağınızı yazabilirsiniz.':'Onaylar ve soru yanıtları için Terminal görünümünü kullanın.'))
+          .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(shell?t.muted:t.dim).child(shell&&ready?'Claude Code bu satırı kabukta çalıştırır · çıktı sohbete düşer':ready&&queue?'Agent çalışıyor · gönderirsen sıraya girer, bir sonraki adımda okur':ready?'Enter gönderir · Shift+Enter yeni satır':status==='working'?'Agent çalışıyor. Taslağınızı yazabilirsiniz.':status==='blocked'&&data?.prompt?'İzin isteğini yukarıdaki karttan yanıtlayabilirsin.':'Onaylar ve soru yanıtları için Terminal görünümünü kullanın.'))
           .child(this.button('paste-image',this.pasting?'Ekleniyor…':'Görsel yapıştır',cx=>this.pasteImages(cx)))
           .child(this.button('chat-send',this.sending?'Gönderiliyor…':shell?'Çalıştır →':queue?'Sıraya ekle →':'Gönder →',cx=>{if(ready)this.send(cx);},Boolean(ready))))));
   }

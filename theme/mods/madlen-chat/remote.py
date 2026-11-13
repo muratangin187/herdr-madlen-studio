@@ -60,6 +60,8 @@ def snapshot(address,limit=None):
     result=json.loads(response.stdout)
     if result.get('error'):raise ValueError(result['error'])
     result['terminal']=address
+    # The permission card answers only local sessions; remote prompts stay in the Terminal.
+    result.pop('prompt',None)
     for message in result['messages']:
         for attachment in message.get('attachments',[]):
             blob=attachment.pop('blob',None)
