@@ -18,3 +18,4 @@ jobs:
       - run: python3 -m unittest discover -s extras/outputs -p test_install.py
       - run: python3 -m unittest discover -s extras/outputs/mod -p test_history.py
       - run: node test-chat-state.cjs
+      - run: node test-previews.mjs
