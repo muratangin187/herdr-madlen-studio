@@ -143,7 +143,10 @@ export default class MadlenChat extends View {
     const text=this.input.value().trim(), d=this.data, target=this.target, attachments=this.imageDrafts[target?.terminal]??[];
     if((!text&&!attachments.length)||!d||this.sending||this.pasting||this.error||this.staged[target?.terminal])return;
     const status=terminals().find(t=>t.address===target?.terminal)?.status??d.status;
-    if(!['idle','done'].includes(status)){this.sendError='Agent henüz hazır değil. Mesaj taslağınız korundu.';cx.notify();return;}
+    // While Claude Code works, a send joins its queue and is read between steps, as typed in the terminal.
+    const queue=status==='working'&&d.kind==='claude'&&!target.terminal.includes('/');
+    if(!['idle','done'].includes(status)&&!queue){this.sendError='Agent henüz hazır değil. Mesaj taslağınız korundu.';cx.notify();return;}
+    if(queue&&(attachments.length||text.startsWith('!'))){this.sendError='Görsel ve ! komutu agent hazır olduğunda gönderilebilir. Taslağınız korundu.';cx.notify();return;}
     this.sendError='';this.sending=true;cx.notify();
     cx.spawn(async cx=>{
       try{
@@ -161,10 +164,11 @@ export default class MadlenChat extends View {
     const user=m.role==='user';
     return h_flex().id(`message-${m.id}`).w_full().max_w(this.columnWidth()).flex_none().gap(12).items_start().when(user,e=>e.justify_end())
       .when(!user,e=>e.child(div().size(24).mt(5).flex_none().rounded_full().bg(t.selected).flex().items_center().justify_center().text_color(t.accent).overflow_hidden().child(image('mods/madlen-heading/mascot.webp').size(24))))
-      .child(v_flex().min_w(0).max_w(user?this.columnWidth()*0.84:this.columnWidth()-36).when(!user,e=>e.flex_1().w_full()).gap(8).p(user?16:4).rounded(18).bg(user?'#5746db':t.canvas).text_color(user?'#ffffff':t.foreground)
+      .child(v_flex().min_w(0).max_w(user?this.columnWidth()*0.84:this.columnWidth()-36).when(!user,e=>e.flex_1().w_full()).gap(8).p(user?16:4).rounded(18).bg(user?'#5746db':t.canvas).text_color(user?'#ffffff':t.foreground).when(Boolean(m.queued),e=>e.opacity(0.72))
         .child(m.shell?h_flex().gap(8).items_start().font_family(this.mono()).text_size(13.5).text_color('#ffffff').child(div().flex_none().opacity(0.7).child('!')).child(div().min_w(0).child(m.text))
           :user?div().text_size(15).text_color('#ffffff').child(m.text||'Görsel eklendi'):this.markdown(`md-${m.id}`,m.text||''))
-        .when(Boolean(m.attachments?.length),e=>e.child(h_flex().flex_wrap().gap(8).children(m.attachments.map((a,i)=>this.thumbnail(a,`attachment-${m.id}-${i}`))))));
+        .when(Boolean(m.attachments?.length),e=>e.child(h_flex().flex_wrap().gap(8).children(m.attachments.map((a,i)=>this.thumbnail(a,`attachment-${m.id}-${i}`)))))
+        .when(Boolean(m.queued||m.midturn),e=>e.child(div().text_size(11.5).text_color('#ffffffb3').child(m.queued?'Sırada · agent bir sonraki adımda okuyacak':'İş sürerken gönderildi'))));
   }
   tools(group,t){
     const id=group.id, open=this.expanded[id];
@@ -202,7 +206,8 @@ export default class MadlenChat extends View {
     const same=this.target?.terminal===target?.terminal&&target?.tab===activeTab;
     const data=same?this.data:null;
     const status=terminals().find(x=>x.address===target?.terminal)?.status??data?.status;
-    const ready=data&&!this.error&&!this.sending&&!this.pasting&&!this.staged[target?.terminal]&&['idle','done'].includes(status);
+    const queue=status==='working'&&data?.kind==='claude'&&!target?.terminal?.includes('/');
+    const ready=data&&!this.error&&!this.sending&&!this.pasting&&!this.staged[target?.terminal]&&(['idle','done'].includes(status)||queue);
     const shell=this.shellMode(this.input.value());this.shellDraft=shell;
     const groups=[];
     for(const m of data?.messages??[]){if(m.role==='tool'){if(groups.at(-1)?.role==='tools')groups.at(-1).items.push(m);else groups.push({id:`tools-${m.id}`,role:'tools',items:[m]});}else groups.push(m);}
@@ -242,8 +247,8 @@ export default class MadlenChat extends View {
         .child(Textarea.new(this.input).w_full().min_w(0).flex_none().text_size(shell?14:15).text_color(t.foreground).when(shell,e=>e.font_family(this.mono())))
         .child(h_flex().gap(10).items_center()
           .when(shell,e=>e.child(div().flex_none().px(7).py(2).rounded(6).bg(t.accent+'26').text_color(t.accent).font_semibold().text_size(11).child('! KOMUT')))
-          .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(shell?t.muted:t.dim).child(shell&&ready?'Claude Code bu satırı kabukta çalıştırır · çıktı sohbete düşer':ready?'Enter gönderir · Shift+Enter yeni satır':status==='working'?'Agent çalışıyor. Taslağınızı yazabilirsiniz.':'Onaylar ve soru yanıtları için Terminal görünümünü kullanın.'))
+          .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(shell?t.muted:t.dim).child(shell&&ready?'Claude Code bu satırı kabukta çalıştırır · çıktı sohbete düşer':ready&&queue?'Agent çalışıyor · gönderirsen sıraya girer, bir sonraki adımda okur':ready?'Enter gönderir · Shift+Enter yeni satır':status==='working'?'Agent çalışıyor. Taslağınızı yazabilirsiniz.':'Onaylar ve soru yanıtları için Terminal görünümünü kullanın.'))
           .child(this.button('paste-image',this.pasting?'Ekleniyor…':'Görsel yapıştır',cx=>this.pasteImages(cx)))
-          .child(this.button('chat-send',this.sending?'Gönderiliyor…':shell?'Çalıştır →':'Gönder →',cx=>{if(ready)this.send(cx);},Boolean(ready))))));
+          .child(this.button('chat-send',this.sending?'Gönderiliyor…':shell?'Çalıştır →':queue?'Sıraya ekle →':'Gönder →',cx=>{if(ready)this.send(cx);},Boolean(ready))))));
   }
 }

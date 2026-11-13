@@ -101,6 +101,31 @@ class BridgeTests(unittest.TestCase):
         messages=self.claude_records(rows)
         self.assertEqual((messages[0]['role'],messages[0]['text'],messages[0]['shell']),('user','gh repo fork x/y --clone=false',True))
         self.assertEqual([(m['role'],m['text'],m['error']) for m in messages[1:]],[('shell','https://github.com/a/y','warning'),('shell','','')])
+    def test_mid_turn_and_queued_messages(self):
+        rows=[{'type':'queue-operation','operation':'enqueue','content':'okundu mu'},
+              {'type':'attachment','uuid':'q','attachment':{'type':'queued_command','prompt':'okundu mu','commandMode':'prompt','origin':{'kind':'human'}}},
+              {'type':'queue-operation','operation':'remove','reason':'absorbed_mid_turn','content':'okundu mu'},
+              {'type':'attachment','uuid':'n','attachment':{'type':'queued_command','prompt':'<task-notification>x</task-notification>','commandMode':'task-notification','origin':{'kind':'task-notification'}}},
+              {'type':'queue-operation','operation':'enqueue','content':'sonraki prompt'},
+              {'type':'queue-operation','operation':'dequeue'},
+              {'type':'user','uuid':'p','message':{'role':'user','content':'sonraki prompt'}},
+              {'type':'queue-operation','operation':'enqueue','content':'<task-notification>y</task-notification>'},
+              {'type':'queue-operation','operation':'enqueue','content':'bekleyen'}]
+        messages=self.claude_records(rows)
+        self.assertEqual([(m['text'],bool(m.get('midturn')),bool(m.get('queued'))) for m in messages],
+                         [('okundu mu',True,False),('sonraki prompt',False,False),('bekleyen',False,True)])
+    def test_working_claude_send_joins_queue(self):
+        with patch.object(bridge,'resolve',return_value=({'status':{'state':'working'}},'claude','s',Path('/tmp'),False)),patch.object(bridge.b,'run') as run:
+            run.return_value.returncode=0;run.return_value.stdout='{"started":false}'
+            self.assertEqual(bridge.send('t1','s','bir de şuna bak'),{'ok':True})
+            run.assert_called_once_with(['hc','send','--if','working','t1','bir de şuna bak'])
+            run.reset_mock()
+            for text in ('! ls','/compact'):
+                with self.assertRaises(ValueError):bridge.send('t1','s',text)
+            run.assert_not_called()
+        with patch.object(bridge,'resolve',return_value=({'status':{'state':'working'}},'codex','s',Path('/tmp'),True)),patch.object(bridge.b,'run') as run:
+            with self.assertRaisesRegex(ValueError,'Agent çalışıyor'):bridge.send('t1','s','hello')
+            run.assert_not_called()
     def test_limit_reads_only_the_newest_messages(self):
         with tempfile.TemporaryDirectory() as d:
             p=Path(d)/'test.jsonl'

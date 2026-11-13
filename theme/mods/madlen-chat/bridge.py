@@ -131,9 +131,22 @@ def claude_local_command(text,rid):
     return None
 
 
+def claude_queued(r,rid):
+    """A message the person sent while Claude Code was working, read between two steps."""
+    a=r.get('attachment')
+    if not isinstance(a,dict) or a.get('type')!='queued_command' or a.get('isMeta'):return None
+    origin=a.get('origin') or {}
+    if not isinstance(origin,dict) or origin.get('kind')!='human' or a.get('commandMode') not in (None,'prompt'):return None
+    text=clean(text_content(a.get('prompt')))
+    return dict(id=rid,role='user',text=text,attachments=[],midturn=True) if text else None
+
+
 def record_items(r,kind,ordinal,results):
     items=[]
     if r.get('isSidechain'):return items
+    if kind=='claude' and r.get('type')=='attachment':
+        queued=claude_queued(r,r.get('uuid') or str(ordinal))
+        return [queued] if queued else items
     # API request blobs duplicate turns and include hidden prompt wrappers.
     if kind=='claude' and r.get('type') not in (None,'user','assistant'):return items
     p=r.get('payload',{}) if kind=='codex' else r.get('message',{})
@@ -166,8 +179,20 @@ def record_items(r,kind,ordinal,results):
 def read_records(path,kind,limit=None):
     """Read from the end of the log; with a limit, stop after that many non-tool messages."""
     chunks=[]; results={}; shown=0; more=False
+    # Claude Code's queue: enqueue, then remove (read mid-turn) or dequeue (sent as the next prompt).
+    removed={}; dequeued=0
     for ordinal,r in enumerate(b.reverse_json(path)):
         if limit and shown>=limit:more=True;break
+        if kind=='claude' and r.get('type')=='queue-operation':
+            op,content=r.get('operation'),str(r.get('content') or '')
+            if op=='remove':removed[content]=removed.get(content,0)+1
+            elif op=='dequeue':dequeued+=1
+            elif op=='enqueue':
+                if removed.get(content):removed[content]-=1
+                elif dequeued:dequeued-=1
+                elif content.strip() and not content.startswith(('<task-notification','<agent-message')):
+                    chunks.append([dict(id='queued-'+str(r.get('timestamp') or ordinal),role='user',text=content,attachments=[],queued=True)]);shown+=1
+            continue
         items=record_items(r,kind,ordinal,results)
         if items:chunks.append(items);shown+=sum(m['role']!='tool' for m in items)
     out=[m for items in reversed(chunks) for m in items]
@@ -198,10 +223,15 @@ def send(address,expected,text,attachments=None):
     if len(text)>50000:raise ValueError('Bu mesaj çok uzun. Terminal görünümünü kullanın.')
     t,kind,sid,path,projection=resolve(address)
     if sid!=expected:raise ValueError('Oturum değişti. Sohbeti yenileyip tekrar deneyin.')
-    if (t.get('status') or {}).get('state') not in ('idle','done'):
+    state=(t.get('status') or {}).get('state')
+    # Claude Code queues a prompt typed while it works and reads it between steps, as in the terminal.
+    queue=state=='working' and kind=='claude'
+    if state not in ('idle','done') and not queue:
         raise ValueError('Agent çalışıyor veya yanıt bekliyor. Terminal görünümünden devam edin.')
     if text.lstrip().startswith('/'):
         raise ValueError('Slash komutlarını terminal görünümünde kullanın.')
+    if queue and (attachments or text.lstrip().startswith('!')):
+        raise ValueError('Görsel ve ! komutu agent hazır olduğunda gönderilebilir. Taslağınız korundu.')
     staged=False
     if attachments:
         if not isinstance(attachments,list) or len(attachments)>3:raise ValueError('En fazla 3 görsel ekleyebilirsiniz.')
@@ -239,7 +269,7 @@ def send(address,expected,text,attachments=None):
             return dict(error=str(e)+' Görsel terminal taslağında olabilir; Terminal görünümünden kontrol edip gönderin.',attachments_staged=staged)
     # Core only supports --if idle/working; a completed TUI reports done.
     # Default send still rejects blocked programs; never use --force.
-    guard=['--if','idle'] if (t.get('status') or {}).get('state')=='idle' else []
+    guard=['--if','idle'] if (t.get('status') or {}).get('state')=='idle' else ['--if','working'] if queue else []
     # Empty bracketed paste can make Claude re-read the image clipboard.
     r=b.run(['hc','keys',address,'enter'] if staged and not text.strip() else ['hc','send',*guard,address,text])
     if r.returncode:
