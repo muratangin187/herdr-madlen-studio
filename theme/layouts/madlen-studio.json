@@ -79,12 +79,12 @@
                 "mod": "madlen-quota"
               },
               "size": {
-                "px": 54
+                "px": 210
               }
             }
           ],
           "size": {
-            "px": 80
+            "px": 236
           },
           "resizable": false
         },
