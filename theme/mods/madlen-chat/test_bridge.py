@@ -114,18 +114,11 @@ class BridgeTests(unittest.TestCase):
         messages=self.claude_records(rows)
         self.assertEqual([(m['text'],bool(m.get('midturn')),bool(m.get('queued'))) for m in messages],
                          [('okundu mu',True,False),('sonraki prompt',False,False),('bekleyen',False,True)])
-    def test_working_claude_send_joins_queue(self):
-        with patch.object(bridge,'resolve',return_value=({'status':{'state':'working'}},'claude','s',Path('/tmp'),False)),patch.object(bridge.b,'run') as run:
-            run.return_value.returncode=0;run.return_value.stdout='{"started":false}'
-            self.assertEqual(bridge.send('t1','s','bir de şuna bak'),{'ok':True})
-            run.assert_called_once_with(['hc','send','--if','working','t1','bir de şuna bak'])
-            run.reset_mock()
-            for text in ('! ls','/compact'):
-                with self.assertRaises(ValueError):bridge.send('t1','s',text)
-            run.assert_not_called()
-        with patch.object(bridge,'resolve',return_value=({'status':{'state':'working'}},'codex','s',Path('/tmp'),True)),patch.object(bridge.b,'run') as run:
-            with self.assertRaisesRegex(ValueError,'Agent çalışıyor'):bridge.send('t1','s','hello')
-            run.assert_not_called()
+    def test_normal_send_during_work_defers_without_typing(self):
+        for kind in ('claude','codex'):
+            with patch.object(bridge,'resolve',return_value=({'status':{'state':'working'}},kind,'s',Path('/tmp'),False)),patch.object(bridge.b,'run') as run:
+                self.assertEqual(bridge.send('t1','s','bir de şuna bak'),{'deferred':True,'delivery':'not_sent'})
+                run.assert_not_called()
     SCREEN='\n'.join(['❯ Bash ile şu komutu çalıştır','  ⎿  $ touch a.txt','─'*60,' Bash command',' Tip: auto mode handles these prompts for you',' Create empty file a.txt',' '+'╌'*60,' touch a.txt',' '+'╌'*60,
                        ' Do you want to proceed?',' ❯ 1. Yes','   2. Yes, and always allow access to /tmp/x','      from this project','   3. No',' Esc to cancel · Tab to amend'])
     def test_permission_dialog_is_parsed(self):

@@ -1,6 +1,6 @@
 import { View, div, image, svg } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { theme, run, props, window, shared, setShared, updates, layout } from "herdr";
+import { theme, run, props, window, shared, setShared, settings, layout } from "herdr";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -34,26 +34,15 @@ export default class WorkspaceChrome extends View {
     const collapsed = narrow();
     if (props()?.section) return h_flex().size_full().px(22).items_center().bg(t.chrome).font_family("Helvetica Neue").text_size(10).font_semibold().text_color(t.dim)
       .when(!collapsed, el=>el.child(props().section));
-    if (props()?.footer) {
-      const row = (id, icon, label, dim, action) => h_flex().id(id).h(34).px(12).gap(7).items_center().rounded(8)
-        .when(collapsed, el => el.relative().w(32).px(0).justify_center().tooltip(label))
-        .text_color(dim ? t.dim : t.muted).hover(s => s.bg(t.hover).text_color(t.foreground)).cursor_pointer()
-        .on_click(action).child(svg(`mods/madlen-chrome/${icon}.svg`).size(17))
-        .when(!collapsed, el => el.child(label));
-      const ready = div().size(6).rounded_full().bg(t.accent);
-      return h_flex().size_full().items_center().justify_between().bg(t.chrome).border_t(1).border_color(t.border).px(8).pt(4).pb(8).font_family("Helvetica Neue").text_size(14)
-        .when(collapsed, el => el.px(0).gap(0).justify_center())
-        .child(row("settings", "settings", "Ayarlar", false, () => run("app.settings"))
-          .when(Boolean(updates().app.ready), el => el.child(collapsed ? ready.absolute().top(5).right(6) : ready)))
-        .child(row("machine", "plus", "Makine ekle", true, () => run("mod.open", { name: "machine-add" })));
-    }
+    const root = layout(), w = window();
+    // On the macOS rail leave the window buttons clear; the agents list can expand it.
     if (collapsed) return v_flex().size_full().bg(t.chrome).items_center().justify_end().pb(5)
-      .child(this.button("sidebar-expand", "»", toggleSidebar));
-    return h_flex().size_full().bg(t.chrome).pl(collapsed ? 6 : 14).pr(10).gap(4).items_center().text_size(13.5)
-      .when(window()?.platform === "macos" && !window()?.fullscreen && !collapsed, el => el.pl(76))
-      .when(!collapsed, el => el.child(h_flex().flex_1().gap(8).items_center().child(image("mods/madlen-chrome/wordmark.svg").w(100).h(24))))
+      .when(!(w?.platform === "macos" && !w.fullscreen && root?.traffic_lights), el => el.child(this.button("sidebar-expand", "»", toggleSidebar)));
+    const lightsPadding = w?.platform === "macos" && !w.fullscreen && root?.traffic_lights
+      ? (root.traffic_lights[0] + 64) / settings().zoom : 14;
+    return h_flex().size_full().bg(t.chrome).pl(lightsPadding).pr(10).gap(4).items_center().text_size(12)
+      .child(h_flex().flex_1().items_center().child(image("mods/madlen-chrome/wordmark.svg").w(82).h(20)))
 
-      // On the macOS rail the traffic lights fill the row; the agents list's » unfolds it.
-      .when(!(collapsed && window()?.platform === "macos"), el => el.child(h_flex().id("sidebar-toggle").h(30).px(5).gap(5).items_center().rounded(6).font_family("Helvetica Neue").text_size(12).text_color(t.dim).cursor_pointer().hover(s=>s.bg(t.hover)).tooltip("Kenar çubuğunu daralt / genişlet").on_mouse_down("left", (_e,cx)=>cx.stop_propagation()).on_click(toggleSidebar).child(svg("mods/madlen-chrome/chevron-left.svg").size(13)).when(!collapsed,el=>el.child("Daralt"))));
+      .child(h_flex().id("sidebar-toggle").h(24).px(5).gap(3).items_center().rounded(6).font_family("Helvetica Neue").text_size(11).text_color(t.dim).cursor_pointer().hover(s=>s.bg(t.hover)).tooltip("Kenar çubuğunu daralt / genişlet").on_mouse_down("left", (_e,cx)=>cx.stop_propagation()).on_click(toggleSidebar).child(svg("mods/madlen-chrome/chevron-left.svg").size(11)).child("Daralt"));
   }
 }

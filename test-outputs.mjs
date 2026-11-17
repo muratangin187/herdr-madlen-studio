@@ -1,0 +1,72 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import vm from 'node:vm';
+const logic = await import('data:text/javascript;base64,' + Buffer.from(fs.readFileSync(new URL('./theme/mods/madlen-outputs/logic.js', import.meta.url))).toString('base64'));
+const items = [{kind:'json', name:'old.json', mtime:10}, {kind:'image', name:'new.png', mtime:30}, {kind:'json', name:'new.json', mtime:20}];
+assert.deepEqual(logic.groups(items).map(g => [g.id, g.items.map(f => f.name)]), [['image',['new.png']], ['json',['new.json','old.json']]]);
+assert.deepEqual(logic.groups([]), []);
+assert.equal(logic.targetOf({terminal:'xps/t1'}, null, [], []), 'xps/t1');
+assert.equal(logic.targetOf({pane:'chat'}, null, [], [{address:'t2', labels:{'herdr.chat':'chat'}}]), 't2');
+assert.equal(logic.targetOf(null, {tabs:[{id:'active',active:true}]}, [{tab:'other',terminal:'wrong'}, {tab:'active',terminal:'right'}], []), 'right');
+
+let address = 'a', isVisible = true;
+const pending = [], jobs = [];
+const cx = {notify(){}, timer:{every(){}}, spawn(fn){ const job=fn(this); jobs.push(job); return job; }};
+const context = {View:class {}, ...logic, theme:()=>({}), settings:()=>({}), checking:()=>false,
+  focused:()=>({terminal:address}), spaces:()=>[], panes:()=>[], terminals:()=>[],
+  layout:()=>isVisible ? {id:'panel',hidden:false,children:[{id:'panel-body',active:'outputs'}]} : null,
+  exec:(bin,args)=>new Promise((resolve,reject)=>pending.push({bin,args,resolve,reject})), appHome:()=>'/tmp',
+  notify(){}, EditorState:{new:()=>({release(){}})}, Date, Set, Map, Math, JSON};
+vm.createContext(context);
+vm.runInContext(fs.readFileSync(new URL('./theme/mods/madlen-outputs/main.js', import.meta.url),'utf8')
+  .replace(/^import .*;\n/gm,'').replace('export default class Outputs','globalThis.Outputs = class Outputs'), context);
+const view = new context.Outputs(); view.init({},cx);
+view.refresh(cx); assert.equal(pending.length,1);
+view.refresh(cx); assert.equal(pending.length,1,'deduplicates pending scans');
+address='b'; view.refresh(cx); assert.equal(pending.length,2,'agent switch fetches immediately despite throttle');
+pending[0].resolve({code:0,stdout:JSON.stringify({session:'sa',items:[{name:'secret from A'}]})}); await jobs[0];
+assert.equal(view.items.length,0,'late response from A cannot appear in B');
+pending[1].resolve({code:0,stdout:JSON.stringify({session:'sb',items:[]})}); await jobs[1];
+assert.equal(view.session,'sb'); assert.equal(view.loaded,true);
+isVisible=false; view.refresh(cx,true); assert.equal(pending.length,2,'hidden panel never scans');
+isVisible=true;
+const item={path:'/tmp/fixture.md',kind:'markdown',previewable:true};
+view.show(item,{modifiers:{}},cx); assert.equal(pending[2].args.includes('preview'),true);
+assert.equal(pending[2].args.includes('sb'),true,'actions bind to the listed session');
+view.clearPreview(); pending[2].resolve({code:0,stdout:JSON.stringify({text:'late preview'})}); await jobs[2];
+assert.equal(view.preview,null,'back cancels late preview');
+view.show(item,{modifiers:{platform:true}},cx); assert.equal(pending[3].args.includes('open'),true,'Cmd-click opens externally');
+pending[3].resolve({code:0,stdout:'{"ok":true}'}); await jobs[3];
+view.show({path:'/tmp/report.pdf',previewable:false},{},cx); assert.equal(pending[4].args.includes('open'),true,'unsupported preview types open directly');
+pending[4].resolve({code:0,stdout:'{"ok":true}'}); await jobs[4];
+address='c'; view.refresh(cx); const errorJob=jobs.at(-1), errorRequest=pending.at(-1);
+address='d'; view.refresh(cx); errorRequest.reject(Error('old failure')); await errorJob;
+assert.equal(view.error,'','late errors cannot replace another agent');
+pending.at(-1).resolve({code:0,stdout:'{"session":"sd","items":[]}'}); await jobs.at(-1);
+address='xps/remote';view.refresh(cx);
+pending.at(-1).resolve({code:0,stdout:'{"session":"remote-session","items":[]}'});await jobs.at(-1);
+const before=pending.length;
+view.open(item,cx);view.open(item,cx);
+assert.equal(pending.length,before+1,'duplicate downloads are suppressed');
+const downloadJob=jobs.at(-1),key=view.actionKey(item);
+assert.match(view.opening.get(key),/XPS.*indiriliyor/,'visible status starts before transfer');
+assert.ok(pending.at(-1).args.includes('download'));
+const downloaded='/Users/fixture/Downloads/Herdr Çıktılar/xps/hash/fixture.md';
+pending.at(-1).resolve({code:0,stdout:JSON.stringify({downloaded_path:downloaded})});
+await new Promise(setImmediate);
+assert.match(view.opening.get(key),/kaydedildi.*Açılıyor/,'opening follows the completed save');
+assert.equal(pending.at(-1).bin,'/usr/bin/open');assert.deepEqual([...pending.at(-1).args],[downloaded]);
+pending.at(-1).resolve({code:0});await downloadJob;
+assert.equal(view.openResults.get(key).label,'İndirildi · Açıldı');
+assert.equal(view.openResults.get(key).path,downloaded);
+assert.equal(view.opening.has(key),false);
+view.open(item,cx);const failedJob=jobs.at(-1),failedCount=pending.length;
+pending.at(-1).resolve({code:1,stdout:'{"error":"Connection lost"}'});await failedJob;
+assert.equal(pending.length,failedCount,'failed downloads never attempt local opening');
+assert.equal(view.openResults.get(key).error,true);assert.match(view.openResults.get(key).label,/Connection lost/);
+view.open(item,cx);const failedOpen=jobs.at(-1);
+pending.at(-1).resolve({code:0,stdout:JSON.stringify({downloaded_path:downloaded})});await new Promise(setImmediate);
+pending.at(-1).resolve({code:1,stderr:'No application'});await failedOpen;
+assert.equal(view.openResults.get(key).path,downloaded,'a saved file stays revealable when opening fails');
+assert.equal(view.openResults.get(key).error,true);
+console.log('PASS: categories, ordering, empty groups, exact target, stale responses/errors, previews, Cmd-click, Downloads transfer, progress, deduplication and failure states');

@@ -193,7 +193,8 @@ export default class Agents extends View {
       .pl(39)
       .pr(8)
       .rounded(8)
-      .h(26)
+      .min_h(26)
+      .py(4)
       .flex_none()
       .gap(0)
       .items_center()
@@ -205,7 +206,9 @@ export default class Agents extends View {
         .when(Boolean(l), el => el.border_l(1.5).border_color(t.input))
         .when(l === "└" || l === "├", el => el.border_b(1.5).rounded_bl(6))))
       .when(Boolean(pic), el => el.child(div().mr(8).child(pic)))
-      .child(div().flex_1().truncate().text_color(on ? t.foreground : t.muted).child(k.name || k.template || k.program?.name || k.address))
+      .child(div().flex_1().min_w(0).whitespace_normal().line_height("16px").max_h(32).overflow_hidden()
+        .text_color(on ? t.foreground : t.muted).tooltip(k.name || k.template || k.program?.name || k.address)
+        .child(k.name || k.template || k.program?.name || k.address))
       .child(this.status(t, { status: st }, compact));
   }
 
@@ -345,7 +348,8 @@ export default class Agents extends View {
       return h_flex()
         .id(`ag-${a.address}`)
         .px(10)
-        .h(38)
+        .min_h(38)
+        .py(7)
         .mb(3)
         .bg(t.chrome)
         .flex_none()
@@ -367,7 +371,8 @@ export default class Agents extends View {
             this.folded.has(a.address) ? this.folded.delete(a.address) : this.folded.add(a.address);
             cx.notify();
           })).child(pic)))
-        .child(div().flex_1().min_w(0).truncate().text_size(13).font_medium().text_color(t.foreground).child(more || name))
+        .child(div().flex_1().min_w(0).whitespace_normal().text_size(13).line_height("17px").max_h(34).overflow_hidden()
+          .font_medium().text_color(t.foreground).tooltip(more || name).child(more || name))
         .when(Boolean(machine), el => el.child(div().text_size(10).text_color(t.dim).child(machine)))
         .when(subs.length > 0, el => el.child(fold(a, subs)))
         .when(this.hovered === a.address, el => el.child(pin))
@@ -448,7 +453,7 @@ export default class Agents extends View {
         ),
       )
       .when(list.length === 0 && !collapsed, (el) =>
-        el.child(div().px(12).text_size(12).text_color(t.dim).child("Agentlar çalışmaya başladığında burada görünür. Üstteki Yeni başlat düğmesinden bir agent açabilirsiniz.")),
+        el.child(div().px(12).text_size(12).text_color(t.dim).child("Agentlar çalışmaya başladığında burada görünür.")),
       )
       .child(v_flex().id("ag-list").flex_1().min_h(0).px(collapsed ? 0 : 8).overflow_y_scrollbar().mode("always").children(rows))
       .when(collapsed, (el) =>

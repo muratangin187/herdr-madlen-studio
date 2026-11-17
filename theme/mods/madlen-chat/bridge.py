@@ -10,6 +10,20 @@ import binding as b
 import images
 import clipboard
 import time
+import sqlite3
+from datetime import datetime
+
+
+class UnboundSession(ValueError):
+    def __init__(self,t,kind):
+        super().__init__('Bu terminalin sohbet kaydı henüz kesin eşleştirilemedi.')
+        self.terminal=t;self.kind=kind
+
+
+def process_key(t,kind):
+    fg=t.get('foreground') or {}
+    identity=[t.get('created_ms'),t.get('pid'),fg.get('pid'),fg.get('argv'),kind]
+    return 'process:'+hashlib.sha256(json.dumps(identity,sort_keys=True).encode()).hexdigest()
 
 
 def terminal(address):
@@ -32,8 +46,27 @@ def resolve(address):
         match=b.codex_thread(pid,root,screen)
         if match:return t,kind,match[0],Path(match[1]),True
     path=b.exact_log(pid,kind,home)
-    if not path:raise ValueError('Bu terminalin sohbet kaydı henüz kesin eşleştirilemedi. Bir yanıt oluştuktan sonra tekrar deneyin.')
-    return t,kind,path.stem,path,False
+    if not path:raise UnboundSession(t,kind)
+    sid=path.stem
+    if kind=='codex':
+        # A process-owned rollout and the projected SQLite history use the same
+        # session ID; switching adapters must not strand queued messages.
+        try:
+            with path.open() as log:meta=json.loads(log.readline())
+            identifier=(meta.get('payload') or {}).get('id')
+            if meta.get('type')=='session_meta' and isinstance(identifier,str) and re.fullmatch(r'[\da-fA-F-]{36}',identifier):sid=identifier
+        except (OSError,ValueError):pass
+    return t,kind,sid,path,False
+
+
+def delivery_target(address):
+    try:return resolve(address)
+    except UnboundSession as e:
+        return e.terminal,e.kind,process_key(e.terminal,e.kind),None,False
+
+
+def matches_target(current,expected):
+    return current[2]==expected or process_key(current[0],current[1])==expected
 
 
 def text_content(content):
@@ -67,7 +100,7 @@ def codex_item(item,ordinal):
         text=clean(text_content(item.get('content')))
         attachments=images.from_content(item.get('content',[]))
         return dict(id=id,role='user',text=text,attachments=attachments) if text or attachments else None
-    if typ=='agentMessage':return dict(id=id,role='assistant',text=item.get('text',''))
+    if typ=='agentMessage':return dict(id=id,role='assistant',text=item.get('text',''),phase=item.get('phase'))
     if typ=='commandExecution':return tool(id,'Terminal komutu',item.get('command',''),item.get('status'),item.get('aggregatedOutput'))
     if typ in ('mcpToolCall','dynamicToolCall'):
         return tool(id,item.get('tool') or item.get('name') or 'Araç',item.get('arguments',{}),item.get('status'),item.get('error') or item.get('result'))
@@ -80,10 +113,20 @@ def codex_item(item,ordinal):
 def projected(sid,limit=None):
     out=[];shown=0;more=False
     with b.database(Path.home()/'.codex/thread_history_1.sqlite') as db:
-        for i,raw in db.execute("SELECT rollout_ordinal,item_json FROM thread_items WHERE thread_id=? AND item_type!='reasoning' ORDER BY rollout_ordinal DESC",(sid,)):
+        try:
+            rows=db.execute("""SELECT i.rollout_ordinal,i.item_json,i.turn_id,i.created_at_ms,
+                t.status,t.duration_ms,t.final_agent_item_id
+                FROM thread_items i LEFT JOIN thread_turns t ON t.thread_id=i.thread_id AND t.turn_id=i.turn_id
+                WHERE i.thread_id=? AND i.item_type!='reasoning' ORDER BY i.rollout_ordinal DESC""",(sid,))
+        except sqlite3.OperationalError:
+            # Older schemas stay readable; without completion evidence, never fold.
+            rows=((i,raw,None,None,None,None,None) for i,raw in db.execute("SELECT rollout_ordinal,item_json FROM thread_items WHERE thread_id=? AND item_type!='reasoning' ORDER BY rollout_ordinal DESC",(sid,)))
+        for i,raw,turn,at,status,duration,final in rows:
             if limit and shown>=limit:more=True;break
             v=codex_item(json.loads(raw),i)
-            if v and (v.get('text') or v.get('attachments')):out.append(v);shown+=v['role']!='tool'
+            if v and (v.get('text') or v.get('attachments')):
+                v.update(turn_id=turn,at=at,turn_status=status,duration_ms=duration,final_id=final)
+                out.append(v);shown+=v['role']!='tool'
     return out[::-1],more
 
 
@@ -174,7 +217,54 @@ def record_items(r,kind,ordinal,results):
         for c in content if isinstance(content,list) else []:
             if c.get('type')=='tool_use':items.append(tool(c.get('id',rid),c.get('name','Araç'),c.get('input',{})))
             elif c.get('type')=='tool_result':results[c.get('tool_use_id')]=text_content(c.get('content'))
+    for item in items:
+        item['at']=timestamp_ms(r.get('timestamp'))
+        if item['role']=='assistant' and kind=='codex':item['phase']=p.get('channel')
     return items
+
+
+def timestamp_ms(value):
+    try:
+        if isinstance(value,(int,float)):return value
+        return round(datetime.fromisoformat(value.replace('Z','+00:00')).timestamp()*1000)
+    except (ValueError,TypeError,AttributeError,OverflowError):
+        return None
+
+
+def annotate_turns(chunks,kind):
+    """Use producer completion events, never an idle terminal or a gap in text."""
+    pending=[];turn=None;candidate=False
+
+    def finish(completed=False,duration=None,identifier=None):
+        nonlocal pending,turn,candidate
+        final=next((m for m in reversed(pending) if m['role']=='assistant' and m.get('text')),None)
+        identifier=identifier or (f"{kind}-{final['id']}" if final and completed else turn)
+        for m in pending:
+            m.update(turn_id=identifier,turn_status='completed' if completed else 'inProgress',
+                     duration_ms=duration,final_id=final['id'] if final and completed else None)
+        pending=[];turn=None;candidate=False
+
+    for record,items in chunks:
+        payload=record.get('payload') or {}
+        event=payload.get('type') if record.get('type')=='event_msg' else None
+        if kind=='codex' and event=='task_started':
+            finish();turn=payload.get('turn_id')
+        elif kind=='codex' and event in ('task_complete','turn_aborted'):
+            finish(event=='task_complete',payload.get('duration_ms'),payload.get('turn_id'))
+        elif kind=='claude' and record.get('type')=='system' and record.get('subtype')=='turn_duration':
+            finish(True,record.get('durationMs'))
+        if not items:continue
+        if any(m['role']=='user' and m.get('queued') for m in items):
+            finish(candidate)
+            continue
+        if any(m['role']=='user' and not m.get('midturn') and not m.get('shell') for m in items):
+            if kind=='claude' and pending:finish(candidate)
+            if turn is None:turn=f"{kind}-{items[0]['id']}"
+        pending.extend(items)
+        if kind=='claude' and record.get('type')=='assistant':
+            candidate=(record.get('message') or {}).get('stop_reason')=='end_turn'
+    finish(candidate if kind=='claude' else False)
+    return [m for _,items in chunks for m in items]
 
 
 def read_records(path,kind,limit=None):
@@ -192,11 +282,12 @@ def read_records(path,kind,limit=None):
                 if removed.get(content):removed[content]-=1
                 elif dequeued:dequeued-=1
                 elif content.strip() and not content.startswith(('<task-notification','<agent-message')):
-                    chunks.append([dict(id='queued-'+str(r.get('timestamp') or ordinal),role='user',text=content,attachments=[],queued=True)]);shown+=1
+                    chunks.append((r,[dict(id='queued-'+str(r.get('timestamp') or ordinal),role='user',text=content,attachments=[],queued=True)]));shown+=1
             continue
         items=record_items(r,kind,ordinal,results)
-        if items:chunks.append(items);shown+=sum(m['role']!='tool' for m in items)
-    out=[m for items in reversed(chunks) for m in items]
+        lifecycle=(kind=='codex' and r.get('type')=='event_msg' and (r.get('payload') or {}).get('type') in ('task_started','task_complete','turn_aborted')) or (kind=='claude' and r.get('type')=='system' and r.get('subtype')=='turn_duration' and not r.get('isSidechain'))
+        if items or lifecycle:chunks.append((r,items));shown+=sum(m['role']!='tool' for m in items)
+    out=annotate_turns(list(reversed(chunks)),kind)
     for m in out:
         if m['id'] in results:m['output']=str(results[m['id']])[:10000]
     return out,more
@@ -286,31 +377,66 @@ def snapshot(address,limit=None):
     if "/" in address:
         import remote
         return remote.snapshot(address,limit)
-    t,kind,sid,path,projection=resolve(address)
-    messages,more=projected(sid,limit) if projection else read_records(path,kind,limit)
+    try:
+        t,kind,sid,path,projection=resolve(address)
+    except UnboundSession as e:
+        t,kind=e.terminal,e.kind
+        sid=process_key(t,kind);path=None;projection=False
+    unbound=path is None
+    messages,more=([],False) if unbound else projected(sid,limit) if projection else read_records(path,kind,limit)
     status=(t.get('status') or {}).get('state','idle')
     prompt=permission_prompt(address,t) if kind=='claude' else None
-    context=context_usage(path) if kind=='claude' and not projection else None
-    return dict(terminal=address,session=sid,kind=kind,status=status,messages=messages,more=more,prompt=prompt,context=context)
+    context=context_usage(path) if kind=='claude' and path and not projection else None
+    result=dict(terminal=address,session=sid,process_key=process_key(t,kind),unbound=unbound,
+                kind=kind,status=status,messages=messages,more=more,prompt=prompt,context=context)
+    # The remote worker has its own transport cache on the viewing computer.
+    if not getattr(sys,'madlen_remote_worker',False):
+        import history_cache
+        history_cache.save(address,limit,t,kind,result)
+    return result
 
 
-def send(address,expected,text,attachments=None):
+def cached(address,limit=None):
+    import history_cache
+    # hc metadata is served locally even for remote terminals. Never contact SSH
+    # before showing an already verified process's cached history.
+    t,kind,pid=terminal(address)
+    data=history_cache.load(address,limit,t,kind)
+    return dict(data,cached=True,prompt=None) if data else None
+
+
+def exit_agent(address,expected):
+    """Explicit user exit: end only the process whose identity the Chat showed."""
+    t,kind,pid=terminal(address)
+    if not expected or process_key(t,kind)!=expected:
+        raise ValueError('Agent işlemi değişti; kapatılmadı. Güncel sekmeden tekrar deneyin.')
+    try:r=b.run(['hc','kill',address])
+    except Exception:
+        return dict(error='Agentın kapanışı doğrulanamadı. Eski sekmenin durumunu kontrol edin.')
+    if r.returncode:return dict(error='Agent kapatılamadı. Eski sekme çalışmaya devam ediyor olabilir.')
+    return dict(ok=True)
+
+
+def send(address,expected,text,attachments=None,mode='normal'):
     if "/" in address:
         import remote
-        return remote.send(address,expected,text,attachments)
+        return remote.send(address,expected,text,attachments,mode)
     if not text.strip() and not attachments:raise ValueError('Mesaj boş olamaz.')
     if len(text)>50000:raise ValueError('Bu mesaj çok uzun. Terminal görünümünü kullanın.')
-    t,kind,sid,path,projection=resolve(address)
-    if sid!=expected:raise ValueError('Oturum değişti. Sohbeti yenileyip tekrar deneyin.')
+    if mode not in ('normal','steer'):raise ValueError('Geçersiz gönderim biçimi.')
+    t,kind,sid,path,projection=delivery_target(address)
+    if sid!=expected and process_key(t,kind)!=expected:raise ValueError('Oturum değişti. Sohbeti yenileyip tekrar deneyin.')
     state=(t.get('status') or {}).get('state')
-    # Claude Code queues a prompt typed while it works and reads it between steps, as in the terminal.
-    queue=state=='working' and kind=='claude'
-    if state not in ('idle','done') and not queue:
+    if state=='working' and mode=='normal':return dict(deferred=True,delivery='not_sent')
+    steer=state=='working' and mode=='steer'
+    if state not in ('idle','done') and not steer:
         raise ValueError('Agent çalışıyor veya yanıt bekliyor. Terminal görünümünden devam edin.')
     if text.lstrip().startswith('/'):
         raise ValueError('Slash komutlarını terminal görünümünde kullanın.')
-    if queue and (attachments or text.lstrip().startswith('!')):
+    if mode=='steer' and (attachments or text.lstrip().startswith('!')):
         raise ValueError('Görsel ve ! komutu agent hazır olduğunda gönderilebilir. Taslağınız korundu.')
+    if steer and kind=='claude' and not claude_send_now_supported(address,t):
+        raise ValueError('Şimdi yönlendirme için Claude Code 2.1.275 veya yenisi gerekiyor. Mesaj gönderilmedi; sıradan normal gönderimi kullanabilirsiniz.')
     staged=False
     if attachments:
         if not isinstance(attachments,list) or len(attachments)>3:raise ValueError('En fazla 3 görsel ekleyebilirsiniz.')
@@ -324,8 +450,8 @@ def send(address,expected,text,attachments=None):
         clipboard.helper()
         try:
             for path in paths:
-                current=resolve(address)
-                if current[2]!=expected or (current[0].get('status') or {}).get('state') not in ('idle','done'):
+                current=delivery_target(address)
+                if not matches_target(current,expected) or (current[0].get('status') or {}).get('state') not in ('idle','done'):
                     raise ValueError('Oturum veya agent durumu değişti.')
                 before=b.run(['hc','read',address,'--lines','0','--json'])
                 screen=json.loads(before.stdout).get('text','')
@@ -340,34 +466,67 @@ def send(address,expected,text,attachments=None):
                     if len(re.findall(marker,after))>previous:accepted=True;break
                     time.sleep(0.15)
                 if not accepted:raise ValueError('Görselin terminale eklendiği doğrulanamadı.')
-            current=resolve(address)
-            if current[2]!=expected:raise ValueError('Oturum değişti.')
+            current=delivery_target(address)
+            if not matches_target(current,expected):raise ValueError('Oturum değişti.')
             t=current[0]
             if (t.get('status') or {}).get('state') not in ('idle','done'):raise ValueError('Agent henüz hazır değil.')
         except Exception as e:
-            return dict(error=str(e)+' Görsel terminal taslağında olabilir; Terminal görünümünden kontrol edip gönderin.',attachments_staged=staged)
+            return dict(error=str(e)+' Görsel terminal taslağında olabilir; Terminal görünümünden kontrol edip gönderin.',attachments_staged=staged,delivery='staged' if staged else 'not_sent')
     # Core only supports --if idle/working; a completed TUI reports done.
     # Default send still rejects blocked programs; never use --force.
-    guard=['--if','idle'] if (t.get('status') or {}).get('state')=='idle' else ['--if','working'] if queue else []
+    guard=['--if','idle'] if state=='idle' else ['--if','working'] if steer else []
     # Empty bracketed paste can make Claude re-read the image clipboard.
-    r=b.run(['hc','keys',address,'enter'] if staged and not text.strip() else ['hc','send',*guard,address,text])
+    try:
+        r=b.run(['hc','keys',address,'enter'] if staged and not text.strip() else ['hc','send',*guard,address,text])
+    except Exception:
+        return dict(error='Gönderim onayı alınamadı. Tekrar göndermeden önce Terminal görünümünden kontrol edin.',delivery='uncertain',attachments_staged=staged)
     if r.returncode:
-        if staged:return dict(error='Görseller terminal taslağına eklendi, mesaj gönderilemedi. Terminal görünümünden devam edin.',attachments_staged=True)
-        raise ValueError(r.stderr or 'Mesaj gönderilemedi.')
-    result=json.loads(r.stdout)
+        if staged:return dict(error='Görseller terminal taslağına eklendi, mesaj gönderilemedi. Terminal görünümünden devam edin.',attachments_staged=True,delivery='staged')
+        return dict(error=r.stderr or 'Gönderim doğrulanamadı. Terminal görünümünden kontrol edin.',delivery='uncertain')
     # started=false means the text was sent but no working signal arrived yet.
     # Treating that as a failed send would invite duplicate submissions.
+    if steer and kind=='claude':
+        return steer_claude(address,t)
     return dict(ok=True)
 
 
-def main():
-    p=argparse.ArgumentParser();p.add_argument('--terminal',required=True);p.add_argument('--session');p.add_argument('--text');p.add_argument('--attachments');p.add_argument('--limit',type=int);p.add_argument('--answer');p.add_argument('--fingerprint');a=p.parse_args()
+def claude_send_now_supported(address,t):
     try:
-        result=(answer(a.terminal,a.fingerprint,a.answer) if a.answer is not None
-                else send(a.terminal,a.session,a.text,json.loads(a.attachments) if a.attachments else None) if a.text is not None else snapshot(a.terminal,a.limit))
+        argv=(t.get('foreground') or {}).get('argv') or []
+        executable=argv[0] if argv and Path(argv[0]).is_absolute() else 'claude'
+        args=['hc','exec','--on',address.split('/',1)[0],'--timeout','5','claude','--version'] if '/' in address else [executable,'--version']
+        result=b.run(args)
+        version=re.search(r'\b(\d+)\.(\d+)\.(\d+)\b',result.stdout)
+        return result.returncode==0 and version is not None and tuple(map(int,version.groups()))>=(2,1,275)
+    except Exception:return False
+
+
+def steer_claude(address,original):
+    """Claude's documented sendNow chord; never interrupt or answer a dialog."""
+    try:
+        current,kind,pid=terminal(address)
+        if kind!='claude' or process_key(current,kind)!=process_key(original,kind):
+            return dict(ok=True,steer_error='Mesaj iletildi; işlem değiştiği için yönlendirme tuşu gönderilmedi.')
+        if (current.get('status') or {}).get('state')!='working':
+            return dict(ok=True,steer_error='Mesaj iletildi; agentın durumu değiştiği için ek tuş gönderilmedi.')
+        r=b.run(['hc','keys',address,'ctrl+x','ctrl+s'])
+        if r.returncode:raise ValueError('Tuş iletilemedi.')
+        return dict(ok=True)
+    except Exception:
+        return dict(ok=True,steer_error='Mesaj iletildi; hemen yönlendirme doğrulanamadı. Terminalden kontrol edin.')
+
+
+def main():
+    p=argparse.ArgumentParser();p.add_argument('--terminal',required=True);p.add_argument('--session');p.add_argument('--text');p.add_argument('--mode',choices=['normal','steer'],default='normal');p.add_argument('--attachments');p.add_argument('--limit',type=int);p.add_argument('--answer');p.add_argument('--fingerprint');p.add_argument('--cached',action='store_true');p.add_argument('--exit-agent',action='store_true');a=p.parse_args()
+    try:
+        result=(exit_agent(a.terminal,a.session) if a.exit_agent else answer(a.terminal,a.fingerprint,a.answer) if a.answer is not None
+                else send(a.terminal,a.session,a.text,json.loads(a.attachments) if a.attachments else None,a.mode) if a.text is not None
+                else cached(a.terminal,a.limit) if a.cached else snapshot(a.terminal,a.limit))
         print(json.dumps(result,ensure_ascii=False))
     except Exception as e:
-        print(json.dumps(dict(error=str(e)),ensure_ascii=False));return 1
+        result=dict(error=str(e))
+        if a.text is not None:result['delivery']='not_sent'
+        print(json.dumps(result,ensure_ascii=False));return 1
     return 0
 
 if __name__=='__main__':sys.exit(main())

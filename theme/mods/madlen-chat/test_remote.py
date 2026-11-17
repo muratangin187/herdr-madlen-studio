@@ -1,4 +1,6 @@
 import json
+import base64
+import zlib
 import os
 from pathlib import Path
 import subprocess
@@ -20,9 +22,9 @@ class RemoteTests(unittest.TestCase):
             (home/f'.claude/sessions/{os.getpid()}.json').write_text(json.dumps({'sessionId':sid}))
             (home/f'.claude/projects/test/{sid}.jsonl').write_text(json.dumps({'type':'assistant','message':{'role':'assistant','content':[{'type':'text','text':'Remote fixture response'}]}})+'\n')
             folder=Path(remote.__file__).parent
-            request=dict(address='t1',terminal={'foreground':{'pid':os.getpid()},'status':{'state':'idle'}},kind='claude',screen='',sources={n:(folder/n).read_text() for n in ('bridge.py','binding.py','images.py','clipboard.py')})
+            request=dict(address='t1',terminal={'foreground':{'pid':os.getpid()},'status':{'state':'idle'}},kind='claude',screen='',sources={n:(folder/n).read_text() for n in ('bridge.py','binding.py','images.py','clipboard.py','history_cache.py')})
             result=subprocess.run([sys.executable,'-c',remote.WORKER],input=json.dumps(request),capture_output=True,text=True,env={**os.environ,'HOME':temp},timeout=10)
-            data=json.loads(result.stdout)
+            data=json.loads(zlib.decompress(base64.b64decode(json.loads(result.stdout)['packed'])))
             self.assertEqual(data['session'],sid)
             self.assertEqual(data['messages'][0]['text'],'Remote fixture response')
     def test_remote_snapshot_hides_permission_prompt(self):

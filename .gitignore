@@ -5,3 +5,5 @@ __pycache__/
 *.app/
 artifacts/
 theme/data/
+theme/mods/*/gpui-kit.d.ts
+theme/mods/*/jsconfig.json

@@ -55,7 +55,7 @@ export default class Tabs extends View {
     const item = (c, i) => {
       const program = panes().find(p => p.tab === c.id && p.program?.agent)?.program ?? panes().find(p => p.tab === c.id)?.program;
       const name = /^tb\d+$/.test(c.name) ? program?.name ?? "Terminal" : c.name;
-      return h_flex().id(`tab-${c.id}`).h(34).px(12).gap(7).rounded(9).items_center().flex_none().text_size(12.8)
+      return h_flex().id(`tab-${c.id}`).h(28).px(8).gap(5).rounded(7).items_center().flex_none().text_size(12)
         .border(1).border_color(c.active ? t.accent : t.canvas).bg(c.active ? t.selected : t.canvas).text_color(c.active ? t.accent : t.muted)
         .hover(s => s.bg(t.hover))
         .on_mouse_down("left", (e, cx) => { cx.stop_propagation(); this.pressed = i; if (e.click_count === 2) run("tab.rename", { id: c.id }); })
@@ -74,15 +74,16 @@ export default class Tabs extends View {
     const root = layout(), sidebar = find(root, "sidebar"), w = window();
     // Old saved rails and a dragged-narrow sidebar can be smaller than the window buttons.
     const lightsPadding = w?.platform === "macos" && w.titlebar === "none" && !w.fullscreen && root?.traffic_lights
-      ? Math.max(10, (root.traffic_lights[0] + 64) / settings().zoom - (sidebar?.hidden ? 0 : sidebar?.size?.px ?? 0))
-      : 10;
+      ? Math.max(6, (root.traffic_lights[0] + 64) / settings().zoom - (sidebar?.hidden ? 0 : sidebar?.size?.px ?? 0))
+      : 6;
     const panel = find(root, "panel"), body = find(root, "panel-body");
-    const enabled = shared("workspace.panels") ?? ["files", "changes"];
+    const enabled = [...(shared("workspace.panels") ?? ["files", "changes"]),
+      ...(body?.children ?? []).filter(n => ['previews', 'outputs'].includes(n.id)).map(n => n.id)];
     this.syncPanel(space, panel, body, enabled);
-    return h_flex().size_full().min_w(0).px(10).pl(lightsPadding).gap(3).items_center().bg(t.canvas)
+    return h_flex().size_full().min_w(0).px(6).pl(lightsPadding).gap(2).items_center().bg(t.canvas)
       .on_mouse_up("left", () => { this.pressed = null; })
       .on_scroll_wheel(e => { if (Math.abs(e.delta.y) >= 1) run(e.delta.y > 0 ? "tab.prev" : "tab.next"); })
-      .child(h_flex().id("tab-scroll").flex_1().min_w(0).h_full().items_center().gap(3).overflow_x_scrollbar().children(shown.map(item)))
+      .child(h_flex().id("tab-scroll").flex_1().min_w(0).h_full().items_center().gap(2).overflow_x_scrollbar().children(shown.map(item)))
       .when(w?.buttons, el => el.child(button("minimize", w.platform === "windows" ? svg("mods/madlen-tabs/win-min.svg").size(16) : "−", () => run("window.minimize")))
         .child(button("maximize", w.platform === "windows" ? svg(`mods/madlen-tabs/${w.maximized ? "win-restore" : "win-max"}.svg`).size(16) : "□", () => run("window.maximize")))
         .child(button("close-window", w.platform === "windows" ? svg("mods/madlen-tabs/win-close.svg").size(16) : svg("mods/madlen-pane/close.svg").size(13), () => run("window.close"))));

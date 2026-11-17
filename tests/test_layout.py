@@ -16,7 +16,7 @@ class LayoutTests(unittest.TestCase):
         self.assertEqual(pane['border']['width'],0)
         self.assertEqual(pane['focus']['width'],0)
 
-    def test_pr_panel_is_in_right_panel_and_nav_has_room(self):
+    def test_pr_panel_is_in_right_panel(self):
         root=json.loads((Path(__file__).resolve().parents[1]/'theme/layouts/madlen-studio.json').read_text())
         def walk(n):
             yield n
@@ -24,4 +24,13 @@ class LayoutTests(unittest.TestCase):
         nodes={n.get('id'):n for n in walk(root)}
         self.assertIn('previews',[c['id'] for c in nodes['panel-body']['children']])
         self.assertEqual(nodes['previews']['content']['mod'],'madlen-previews')
-        self.assertGreaterEqual(nodes['madlen-nav']['size']['px'],5*46)
+
+    def test_outputs_share_the_right_panel_without_a_sidebar_entry(self):
+        root=json.loads((Path(__file__).resolve().parents[1]/'theme/layouts/madlen-studio.json').read_text())
+        def walk(n):
+            yield n
+            for c in n.get('children',[]):yield from walk(c)
+        nodes={n.get('id'):n for n in walk(root)}
+        self.assertIn('outputs',[c['id'] for c in nodes['panel-body']['children']])
+        self.assertEqual(nodes['outputs']['content']['mod'],'madlen-outputs')
+        self.assertNotIn('madlen-nav',nodes)
