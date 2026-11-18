@@ -5,10 +5,53 @@ import tempfile
 import unittest
 from unittest.mock import patch
 import bridge
+from types import SimpleNamespace
 
 
 class QuestionTests(unittest.TestCase):
     questions=[dict(id='color',question='Renk?',options=[dict(label='Açık'),dict(label='Koyu')])]
+    SCREEN='\n'.join(['Earlier tool output','─'*60,' ☐ Test yolu','','│ Testi hangi ortamda yapalım?',
+        '│ Ayrı bir ortam da seçebilirsiniz.','','❯ 1. Test ortamı','     Var olan test verilerini kullan.',
+        '  2. Ayrı ortam','     Yeni bir örnekle çalış.','     Sonucu ayrıca göster.',
+        '  3. Type something.','─'*60,'  4. Chat about this','','Enter to select · ↑/↓ to navigate · Esc to cancel'])
+
+    def test_live_question_frame_and_wrapped_descriptions(self):
+        prompt=bridge.parse_question_prompt(self.SCREEN)
+        self.assertEqual(prompt['kind'],'question')
+        self.assertEqual(prompt['title'],'Test yolu')
+        self.assertEqual(prompt['question'],'Testi hangi ortamda yapalım? Ayrı bir ortam da seçebilirsiniz.')
+        self.assertEqual(len(prompt['options']),3,'the footer action is not an answer option')
+        self.assertEqual(prompt['options'][1]['description'],'Yeni bir örnekle çalış. Sonucu ayrıca göster.')
+        self.assertEqual(prompt['options'][2]['label'],'Kendi yanıtınızı yazın (Terminal)')
+        self.assertIsNone(bridge.parse_question_prompt('An example: 1. A\n2. B'))
+
+    def test_live_question_without_any_transcript_question_reaches_snapshot(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'s.jsonl';path.write_text(json.dumps(dict(type='assistant',message=dict(role='assistant',content='Kontrol ediyorum.'))))
+            terminal=dict(status=dict(state='blocked',kind='question'),foreground=dict(pid=123,argv=['claude']))
+            with patch.object(bridge,'resolve',return_value=(terminal,'claude','s',path,False)), \
+                 patch.object(bridge.b,'run',return_value=SimpleNamespace(returncode=0,stdout=json.dumps(dict(text=self.SCREEN)))), \
+                 patch('history_cache.save'):
+                result=bridge.snapshot('t1',40)
+        self.assertFalse(any(m['role']=='question' for m in result['messages']))
+        self.assertEqual(result['prompt']['kind'],'question')
+        self.assertEqual(len(result['prompt']['options']),3)
+
+    def test_unknown_prompt_and_read_failure_still_have_visible_fallback(self):
+        for kind,prompt_kind in [('claude','question'),('claude','permission'),('codex','question')]:
+            terminal=dict(status=dict(state='blocked',kind=prompt_kind,msg='Choose a test environment'))
+            with patch.object(bridge.b,'run',side_effect=OSError('unavailable')):
+                prompt=bridge.blocked_prompt('t1',terminal,kind)
+            self.assertEqual(prompt['kind'],'blocked')
+            self.assertEqual(prompt['summary'],'Choose a test environment')
+        self.assertIsNone(bridge.blocked_prompt('t1',dict(status=dict(state='idle')),'claude'))
+
+    def test_live_question_never_uses_the_permission_key_action(self):
+        terminal=dict(status=dict(state='blocked',kind='question'),foreground=dict(pid=123))
+        fingerprint=bridge.parse_question_prompt(self.SCREEN)['fingerprint']
+        with patch.object(bridge,'terminal',return_value=(terminal,'claude',123)),patch.object(bridge.b,'run') as run:
+            with self.assertRaisesRegex(ValueError,'İzin isteği değişti'):bridge.answer('t1',fingerprint,'1')
+            run.assert_not_called()
 
     def read(self,rows,kind='claude',limit=None):
         with tempfile.TemporaryDirectory() as folder:

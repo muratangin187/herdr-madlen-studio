@@ -382,6 +382,49 @@ def parse_prompt(screen,summary=''):
     return dict(title=title,lines=text,code=code,question=question,options=options,summary=summary,fingerprint=fingerprint)
 
 
+def parse_question_prompt(screen):
+    """An open AskUserQuestion may not be persisted until the person answers it."""
+    lines=[ANSI.sub('',line).strip() for line in screen.splitlines()]
+    rules=[i for i,line in enumerate(lines) if RULE.fullmatch(line)]
+    if len(rules)<2 or not any('to select' in line and ('Enter' in line or 'Space' in line) for line in lines[rules[-1]+1:]):return None
+    body=lines[rules[-2]+1:rules[-1]]
+    text=[];options=[]
+    for line in body:
+        line=line.lstrip('│ ').strip()
+        if not line:continue
+        match=OPTION.match(line)
+        if match:
+            options.append(dict(key=match.group(1),label=match.group(2),description=''))
+        elif options:
+            options[-1]['description']=' '.join(filter(None,(options[-1]['description'],line)))
+        else:text.append(line)
+    if not text or not options:return None
+    title=text.pop(0).lstrip('☐☑□■ ').strip()
+    question=' '.join(text) or title
+    for option in options:
+        if option['label'].rstrip('.')=='Type something':option['label']='Kendi yanıtınızı yazın (Terminal)'
+    fingerprint=hashlib.sha256(json.dumps([title,question,options],ensure_ascii=False).encode()).hexdigest()[:16]
+    return dict(kind='question',title=title,question=question,options=options,fingerprint=fingerprint)
+
+
+def blocked_prompt(address,t,kind):
+    status=t.get('status') or {}
+    if status.get('state')!='blocked':return None
+    prompt=None
+    if kind=='claude':
+        if status.get('kind')=='permission':
+            try:
+                prompt=permission_prompt(address,t)
+                if prompt:prompt['kind']='permission'
+            except (OSError,ValueError,subprocess.TimeoutExpired):pass
+        elif status.get('kind')=='question':
+            try:
+                result=b.run(['hc','read',address,'--lines','0','--json'])
+                if result.returncode==0:prompt=parse_question_prompt(json.loads(result.stdout).get('text',''))
+            except (OSError,ValueError,subprocess.TimeoutExpired):pass
+    return prompt or dict(kind='blocked',summary=str(status.get('msg') or 'Agent yanıtınızı bekliyor. Soruyu Terminal görünümünden kontrol edin.')[:5000])
+
+
 def permission_prompt(address,t):
     status=t.get('status') or {}
     if status.get('state')!='blocked' or status.get('kind')!='permission':return None
@@ -444,7 +487,7 @@ def snapshot(address,limit=None):
     unbound=path is None
     messages,more=([],False) if unbound else projected(sid,limit) if projection else read_records(path,kind,limit)
     status=(t.get('status') or {}).get('state','idle')
-    prompt=permission_prompt(address,t) if kind=='claude' else None
+    prompt=blocked_prompt(address,t,kind)
     context=context_usage(path) if kind=='claude' and path and not projection else None
     try:
         background=activity.claude_jobs(path,sid,(t.get('foreground') or {}).get('pid')) if kind=='claude' and path else activity.codex_jobs(sid) if kind=='codex' and projection else dict(jobs=[])

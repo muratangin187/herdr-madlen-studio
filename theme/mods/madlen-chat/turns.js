@@ -28,6 +28,16 @@ export function questionView(message) {
   return {state,pending,answered,questions,label:pending?'Yanıt bekliyor':answered?'Yanıtlandı':state==='failed'?'Tamamlanmadı':'Geçmiş soru'};
 }
 
+export function liveQuestionMessage(prompt,messages=[]) {
+  if(!prompt||!['question','blocked'].includes(prompt.kind))return null;
+  const question=prompt.question??prompt.summary??'Agent yanıtınızı bekliyor.';
+  const normalize=text=>String(text??'').replace(/\s+/g,' ').trim();
+  if(prompt.kind==='question'&&messages.some(m=>m.role==='question'&&m.question_state==='pending'&&
+    m.questions?.some(q=>normalize(q.question??q.title)===normalize(question))))return null;
+  return {id:`live-${prompt.fingerprint??'blocked'}`,role:'question',question_state:'pending',status:'inProgress',
+    questions:[{question,options:prompt.options??[]}]};
+}
+
 export function conversation(messages,liveStatus) {
   const blocks=[];
   for(const message of messages){

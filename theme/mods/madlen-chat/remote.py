@@ -72,8 +72,10 @@ def snapshot(address,limit=None):
     if result.get('error'):raise ValueError(result['error'])
     result=history_cache.merge(result,previous)
     result['terminal']=address
-    # The permission card answers only local sessions; remote prompts stay in the Terminal.
-    result.pop('prompt',None)
+    # Show remote questions, but never enable the local permission-key action.
+    prompt=result.get('prompt')
+    if prompt and prompt.get('kind') not in ('question','blocked'):
+        result['prompt']=dict(kind='blocked',summary=prompt.get('summary') or prompt.get('title') or 'İzin gerekiyor. Terminal görünümünden yanıtlayın.')
     for message in result['messages']:
         for attachment in message.get('attachments',[]):
             blob=attachment.pop('blob',None)

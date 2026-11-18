@@ -32,8 +32,14 @@ class RemoteTests(unittest.TestCase):
         response=SimpleNamespace(returncode=0,stdout=json.dumps({'session':'s','status':'blocked','messages':[],'prompt':{'title':'Bash command'},'background':background}))
         with patch.object(bridge,'terminal',return_value=({'status':{'state':'blocked','kind':'permission'}},'claude',42)),patch.object(bridge.b,'run',return_value=SimpleNamespace(returncode=0,stdout='{"text":""}')),patch.object(remote.subprocess,'run',return_value=response):
             result=remote.snapshot('mbp/t1')
-            self.assertNotIn('prompt',result)
+            self.assertEqual(result['prompt']['kind'],'blocked')
+            self.assertNotIn('options',result['prompt'],'remote permission prompts never enable the local key action')
             self.assertEqual(result['background'],background)
+    def test_remote_live_question_is_preserved(self):
+        prompt=dict(kind='question',question='Fixture question?',options=[dict(label='A')])
+        response=SimpleNamespace(returncode=0,stdout=json.dumps(dict(session='s',status='blocked',messages=[],prompt=prompt)))
+        with patch.object(bridge,'terminal',return_value=({'status':{'state':'blocked','kind':'question'}},'claude',42)),patch.object(bridge.b,'run',return_value=SimpleNamespace(returncode=0,stdout='{"text":""}')),patch.object(remote.subprocess,'run',return_value=response):
+            self.assertEqual(remote.snapshot('mbp/t1')['prompt'],prompt)
     def test_send_targets_full_remote_address(self):
         data={'session':'s','status':'idle','process_pid':42}
         terminal=({'status':{'state':'idle'}},'claude',42)

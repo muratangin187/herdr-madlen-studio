@@ -1,7 +1,7 @@
 import { View, div, svg, image } from 'gpui-kit';
 import { h_flex, v_flex, TextView, Textarea, TextareaState } from 'gpui-base';
 import { theme, settings, layout, shared, setShared, spaces, panes, terminals, run, exec, appHome, props, openOverlay, closeOverlay, knownAgents, checking, notify } from 'herdr';
-import { conversation, visibleMessages, questionView } from './turns.js';
+import { conversation, visibleMessages, questionView, liveQuestionMessage } from './turns.js';
 import { summarizeTool, summarizeGroup } from './tool-summary.js';
 import { makeOutgoing, reconcileOutgoing, outgoingFor, mergeOutgoing, deliveryLabel, serializeOutbox, restoreOutbox } from './outbox.js';
 import { linkifyFiles, linkTarget } from './links.js';
@@ -167,6 +167,11 @@ export default class MadlenChat extends View {
           .on_click((_e,cx)=>{this.follow=false;this.expanded[id]=!open;cx.notify();}).child(open?'▾ Daralt':`▸ ${hidden} satır daha`))));
   }
   // Claude Code is blocked on a permission dialog: show it here and press the chosen option's key.
+  blockedPrompt(p,t){
+    if(p.kind==='permission')return this.permission(p,t);
+    const question=liveQuestionMessage(p,this.data?.messages);
+    return question?this.question(question,t):div();
+  }
   permission(p,t){
     return v_flex().id('permission-card').flex_none().w_full().max_w(this.columnWidth()).p(18).gap(12).rounded(18).border(1).border_color(t.blocked+'88').bg(t.surface)
       .child(h_flex().justify_between().items_center().child(div().font_semibold().text_size(12).text_color(t.blocked).child('İZİN İSTİYOR')).child(div().text_size(12).text_color(t.dim).child(p.title)))
@@ -634,7 +639,7 @@ export default class MadlenChat extends View {
           .when(Boolean(data?.unbound),e=>e.child(div().text_color(t.dim).child('İlk mesajınızı buradan gönderebilirsiniz. Geçmiş, oturum oluştukça burada görünecek.')))
           .when(Boolean(data?.more),e=>e.child(h_flex().w_full().max_w(this.columnWidth()).justify_center().child(this.button('chat-older',this.pending.has(target?.terminal)?'Yükleniyor…':'Daha eski mesajları göster',cx=>this.older(cx)))))
           .children(visibleMessages(groups,this.expanded).map(m=>this.part(m,t)))
-          .when(Boolean(data?.prompt)&&status==='blocked',e=>e.child(this.permission(data.prompt,t)))
+          .when(Boolean(data?.prompt)&&status==='blocked',e=>e.child(this.blockedPrompt(data.prompt,t)))
           .when(Boolean(data),e=>e.child(h_flex().flex_none().gap(8).items_center().text_size(12).text_color(status==='working'||waiting||background.busy?t.working:status==='blocked'||background.failed?t.blocked:background.unknown||background.unavailable||background.stale?t.dim:t.done)
             .when(status==='working'||waiting||background.busy,e=>e.child(svg('mods/madlen-chrome/spinner.svg').size(12).spin(900)))
             .child(div().child(data?.cached?'Kaydedilen geçmiş · güncelleniyor…':status==='working'?'Yanıt hazırlanıyor…':status==='blocked'?'Devam etmek için yanıtınız gerekiyor.':waiting?waitingLabel:data?.unbound?'Mesaj göndermeye hazır':['idle','done'].includes(status)?background.footer??'✓ Yanıt tamamlandı':'Oturum bağlanıyor…')))))
