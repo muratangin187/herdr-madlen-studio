@@ -22,7 +22,7 @@ class QuestionTests(unittest.TestCase):
         self.assertEqual(prompt['question'],'Testi hangi ortamda yapalım? Ayrı bir ortam da seçebilirsiniz.')
         self.assertEqual(len(prompt['options']),3,'the footer action is not an answer option')
         self.assertEqual(prompt['options'][1]['description'],'Yeni bir örnekle çalış. Sonucu ayrıca göster.')
-        self.assertEqual(prompt['options'][2]['label'],'Kendi yanıtınızı yazın (Terminal)')
+        self.assertEqual(prompt['options'][2]['label'],'Kendi yanıtınızı yazın')
         self.assertIsNone(bridge.parse_question_prompt('An example: 1. A\n2. B'))
 
     def test_live_question_without_any_transcript_question_reaches_snapshot(self):
@@ -118,6 +118,66 @@ class QuestionTests(unittest.TestCase):
             result=bridge.answer_question('t1',bridge.process_key(terminal,'claude'),fingerprint,'2')
         self.assertEqual(result['delivery'],'uncertain')
         self.assertEqual(calls.count(['hc','keys','t1','enter']),1)
+
+    def text_fixture(self,draft=False,changed=False,send_ok=True,address='t1'):
+        terminal=dict(created_ms=1,pid=10,status_ms=100,status=dict(state='blocked',kind='question'),foreground=dict(pid=123,argv=['claude']))
+        state=dict(selected='1');calls=[]
+        fingerprint=bridge.parse_question_prompt(self.SCREEN)['fingerprint']
+        def run(args):
+            calls.append(args)
+            if args[:2]==['hc','read']:
+                screen=self.SCREEN
+                if state['selected']=='3':
+                    screen=screen.replace('❯ 1.','  1.').replace('  3. Type something.','❯ 3. '+('Mevcut taslak' if draft else ''))
+                    screen=screen.replace('Enter to select','Enter to submit')
+                    if changed:screen=screen.replace('Testi hangi ortamda yapalım?','Başka bir soru?')
+                return SimpleNamespace(returncode=0,stdout=json.dumps(dict(text=screen)))
+            if args[:2]==['hc','keys']:
+                self.assertEqual(args,['hc','keys',address,'down','down']);state['selected']='3'
+            else:self.assertEqual(args[:5],['hc','send','--force','--',address])
+            return SimpleNamespace(returncode=0 if send_ok else 1,stdout='')
+        return terminal,fingerprint,run,calls
+
+    def test_free_text_preserves_unicode_multiline_and_literal_prefixes(self):
+        for address in ('t1','box/t1'):
+            terminal,fingerprint,run,calls=self.text_fixture(address=address)
+            text='-- Türkçe ğüşİ 🙂\n! / Bu bir yanıt; komut değil.'
+            with patch.object(bridge,'terminal',return_value=(terminal,'claude',123)),patch.object(bridge.b,'run',side_effect=run):
+                result=bridge.answer_question(address,bridge.process_key(terminal,'claude'),fingerprint,'3','100',text)
+            self.assertTrue(result['ok'])
+            self.assertEqual(calls[-1],['hc','send','--force','--',address,text])
+            self.assertEqual(calls[-2][:2],['hc','read'])
+
+    def test_empty_focused_text_row_keeps_the_same_question_identity(self):
+        focused=self.SCREEN.replace('❯ 1.','  1.').replace('  3. Type something.','❯ 3.').replace('Enter to select','Enter to submit')
+        original=bridge.parse_question_prompt(self.SCREEN);prompt=bridge.parse_question_prompt(focused)
+        self.assertEqual(prompt['fingerprint'],original['fingerprint'])
+        self.assertTrue(prompt['can_answer']);self.assertTrue(prompt['input_empty'])
+        self.assertEqual(prompt['options'][-1]['kind'],'text')
+
+    def test_free_text_never_overwrites_a_terminal_draft_or_new_question(self):
+        for kwargs in (dict(draft=True),dict(changed=True)):
+            terminal,fingerprint,run,calls=self.text_fixture(**kwargs)
+            with patch.object(bridge,'terminal',return_value=(terminal,'claude',123)),patch.object(bridge.b,'run',side_effect=run):
+                with self.assertRaises(ValueError):bridge.answer_question('t1',bridge.process_key(terminal,'claude'),fingerprint,'3','100','Benim yanıtım')
+            self.assertFalse(any(call[:2]==['hc','send'] for call in calls))
+
+    def test_invalid_free_text_is_rejected_before_any_terminal_input(self):
+        for text in ('','  ','a'*10001,'unsafe\x1b[201~','unsafe\x00'):
+            with patch.object(bridge.b,'run') as run,patch.object(bridge,'terminal') as terminal:
+                with self.assertRaises(ValueError):bridge.answer_question('t1','process','fp','3',text=text)
+                run.assert_not_called();terminal.assert_not_called()
+
+    def test_free_text_transport_failure_is_uncertain(self):
+        terminal,fingerprint,run,calls=self.text_fixture()
+        def fail_send(args):
+            result=run(args)
+            if args[:2]==['hc','send']:result.returncode=1
+            return result
+        with patch.object(bridge,'terminal',return_value=(terminal,'claude',123)),patch.object(bridge.b,'run',side_effect=fail_send):
+            result=bridge.answer_question('t1',bridge.process_key(terminal,'claude'),fingerprint,'3','100','Yanıt')
+        self.assertEqual(result['delivery'],'uncertain')
+        self.assertEqual(sum(call[:2]==['hc','send'] for call in calls),1)
 
     def read(self,rows,kind='claude',limit=None):
         with tempfile.TemporaryDirectory() as folder:

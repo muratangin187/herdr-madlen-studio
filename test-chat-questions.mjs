@@ -82,4 +82,37 @@ click();assert.equal(requests.length,3,'an uncertain answer in a different termi
 requests[2].resolve({stdout:'{"error":"Question changed","delivery":"not_sent"}'});await jobs[2];
 assert.equal(view.questionReplies.has('t1'),false,'a definite pre-send failure permits a fresh attempt');
 assert.equal(view.questionReplies.get('other-terminal').status,'uncertain');
+context.TextareaState={new:options=>{
+  const input={text:'',handlers:{},focused:false,placeholder:options.placeholder,
+    value(){return this.text;},set_value(value){this.text=value;this.handlers.change?.({},cx);},
+    set_auto_grow(){},set_soft_wrap(){},on(name,fn){this.handlers[name]=fn;},focus(){this.focused=true;}};
+  return input;
+}};
+context.Textarea={new:input=>element().child('TEXTBOX: '+input.placeholder)};
+const freePrompt={...interactive,options:[...interactive.options,{key:'3',kind:'text',label:'Kendi yanıtınızı yazın'}]};
+view.data.prompt=freePrompt;view.questionReplies.clear();
+assert.equal(view.prepareQuestionText('t1',view.data),true);
+const editor=view.questionTextInputs.values().next().value;
+assert.equal(editor.input.focused,false,'background refresh never steals keyboard focus');
+assert.equal(view.prepareQuestionText('t1',view.data),false,'the input state is retained across polls');
+assert.match(text(view.blockedPrompt(freePrompt,theme)),/TEXTBOX: Yanıtınızı yazın/);
+assert.match(text(view.blockedPrompt(freePrompt,theme)),/Enter gönderir/);
+const start=requests.length;
+editor.input.handlers.submit({shift:false},cx);assert.equal(requests.length,start,'empty Enter does nothing');
+const answer='Türkçe ğüşİ 🙂\nİkinci satır';editor.input.set_value(answer);
+editor.input.handlers.submit({shift:true},cx);assert.equal(requests.length,start,'Shift+Enter never submits');
+editor.input.handlers.submit({shift:false},cx);editor.input.handlers.submit({shift:false},cx);
+assert.equal(requests.length,start+1,'repeated Enter starts only one answer');
+assert.equal(requests[start].args[requests[start].args.indexOf('--question-text')+1],answer);
+requests[start].resolve({stdout:'{"error":"Not sent","delivery":"not_sent"}'});await jobs[start];
+assert.equal(editor.input.value(),answer,'failed delivery preserves the complete draft');
+editor.input.handlers.submit({shift:false},cx);editor.input.set_value('Yeni taslağım');
+requests[start+1].resolve({stdout:'{"ok":true}'});await jobs[start+1];
+assert.equal(editor.input.value(),'Yeni taslağım','a late acknowledgement never clears a newer draft');
+view.questionReplies.clear();editor.input.set_value(answer);editor.input.handlers.submit({shift:false},cx);
+requests[start+2].resolve({stdout:'{"ok":true}'});await jobs[start+2];
+assert.equal(editor.input.value(),'','a confirmed unchanged draft is cleared');
+view.questionReplies.clear();editor.input.set_value(answer);view.data.prompt={...freePrompt,fingerprint:'next-question'};
+const beforeStale=requests.length;editor.input.handlers.submit({shift:false},cx);
+assert.equal(requests.length,beforeStale,'a draft cannot be sent to a different question');assert.equal(editor.input.value(),answer);
 console.log('PASS: question visibility, answers, compact cards, selected options, disclosure, cache guard and free-text questions');

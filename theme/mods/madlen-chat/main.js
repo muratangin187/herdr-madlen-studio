@@ -19,7 +19,7 @@ export default class MadlenChat extends View {
     this.exitFocus=cx.focus_handle();this.exitPending=false;this.exitError='';this.exitingTerminals=new Set();
     if(!this.readOnly)this.exitFocus.focus();
     this.imageDrafts={};this.outbox=restoreOutbox(localStorage.getItem('outbox.v1'));this.availableAgents=new Map();this.checkingAgents=new Set();this.launching=null;this.nextSend=0;this.pasting=false;this.staged={};this.limits={};this.raw=new Map();this.anchor=null;this.reload=new Set();this.answering=false;
-    this.dragging=false;this.offset=0;this.viewport=400;this.viewportWidth=1000;this.contentHeight=400;this.follow=true;this.historyKey=0;this.data=null;this.error='';this.sendError='';this.pending=new Set();this.cache=new Map();this.positions=new Map();this.expanded={};this.drafts={};this.target=null;this.questionReplies=new Map();
+    this.dragging=false;this.offset=0;this.viewport=400;this.viewportWidth=1000;this.contentHeight=400;this.follow=true;this.historyKey=0;this.data=null;this.error='';this.sendError='';this.pending=new Set();this.cache=new Map();this.positions=new Map();this.expanded={};this.drafts={};this.target=null;this.questionReplies=new Map();this.questionTextInputs=new Map();
     this.diskLoaded=new Set();this.updated=new Map();this.reports=new Map();this.background=null;
     this.input=TextareaState.new({placeholder:'Mesajınızı yazın…',rows:1});
     this.input.set_auto_grow(1,4);
@@ -121,7 +121,7 @@ export default class MadlenChat extends View {
         const older=this.anchor?.terminal===target.terminal&&this.anchor.limit===limit;
         if(r.stdout===this.raw.get(target.terminal)&&this.cache.has(target.terminal)&&!this.cache.get(target.terminal).cached){
           if(older)this.anchor=null;
-          changed=this.target?.terminal===target.terminal&&Boolean(this.error);
+          changed=this.target?.terminal===target.terminal&&(this.prepareQuestionText(target.terminal,this.data)||Boolean(this.error));
           if(changed)this.error='';
           return;
         }
@@ -137,7 +137,7 @@ export default class MadlenChat extends View {
           if(this.target?.terminal===target.terminal)this.sendError='';
         }
         this.remember(target.terminal,data);
-        if(this.target?.terminal===target.terminal){this.data=data;this.error='';}
+        if(this.target?.terminal===target.terminal){this.data=data;this.prepareQuestionText(target.terminal,data);this.error='';}
       }catch(e){if(this.target?.terminal===target.terminal)this.error=String(e.message??e);}
       finally{
         this.updated.set(target.terminal,Date.now());this.pending.delete(target.terminal);
@@ -197,21 +197,50 @@ export default class MadlenChat extends View {
       finally{this.answering=false;this.refresh(cx,true);cx.notify();}
     });
   }
-  answerQuestion(key,target,cx){
+  questionTextKey(target,key){return JSON.stringify([target.terminal,target.process,target.fingerprint,target.generation,key]);}
+  prepareQuestionText(terminal,data){
+    if(data?.cached||data?.prompt?.kind!=='question'||!data.prompt.can_answer)return false;
+    this.questionTextInputs??=new Map();
+    const target={terminal,process:data.process_key,fingerprint:data.prompt.fingerprint,generation:data.prompt.generation};
+    let created=false;
+    for(const option of data.prompt.options??[]){
+      const id=this.questionTextKey(target,option.key);
+      if(option.kind!=='text'||this.questionTextInputs.has(id))continue;
+      const input=TextareaState.new({placeholder:'Yanıtınızı yazın…',rows:1});input.set_auto_grow(1,3);input.set_soft_wrap(true);
+      const entry={input,target,key:option.key,hasText:false};
+      input.on('submit',(event,cx)=>{if(!event.shift)this.answerQuestion(option.key,target,cx,input.value());});
+      input.on('change',(_event,cx)=>{const hasText=Boolean(input.value().trim());if(hasText!==entry.hasText){entry.hasText=hasText;cx.notify();}});
+      this.questionTextInputs.set(id,entry);created=true;
+    }
+    while(this.questionTextInputs.size>16)this.questionTextInputs.delete(this.questionTextInputs.keys().next().value);
+    return created;
+  }
+  openQuestionText(key,target,cx){
+    if(this.target?.terminal!==target.terminal||this.data?.process_key!==target.process||this.data?.prompt?.fingerprint!==target.fingerprint||this.data?.prompt?.generation!==target.generation||this.data?.cached)return;
+    this.prepareQuestionText(target.terminal,this.data);
+    this.questionTextInputs?.get(this.questionTextKey(target,key))?.input.focus();cx.notify();
+  }
+  answerQuestion(key,target,cx,text=null){
     const data=this.data;
+    if(text!==null&&!text.trim())return;
     this.questionReplies??=new Map();
     if(this.answering||this.questionReplies.has(target.terminal)||data?.cached||this.error||this.target?.terminal!==target.terminal||data?.process_key!==target.process||data?.prompt?.fingerprint!==target.fingerprint||data?.prompt?.generation!==target.generation)return;
-    const request={...target,key,status:'sending'};
+    const request={...target,key,text,status:'sending'};
     this.answering=true;this.sendError='';this.questionReplies.set(target.terminal,request);cx.notify();
     const same=()=>this.target?.terminal===target.terminal&&this.data?.process_key===target.process&&this.data?.prompt?.fingerprint===target.fingerprint&&this.data?.prompt?.generation===target.generation;
     const settle=value=>{if(this.questionReplies.get(target.terminal)===request){if(value)this.questionReplies.set(target.terminal,value);else this.questionReplies.delete(target.terminal);}};
     cx.spawn(async cx=>{
       try{
-        const result=JSON.parse((await exec('/usr/bin/python3',[`${appHome()}/mods/madlen-chat/bridge.py`,'--terminal',target.terminal,'--session',target.process,'--question-answer',key,'--fingerprint',target.fingerprint,'--prompt-generation',target.generation??''],{timeout:20000})).stdout);
+        const args=[`${appHome()}/mods/madlen-chat/bridge.py`,'--terminal',target.terminal,'--session',target.process,'--question-answer',key,'--fingerprint',target.fingerprint,'--prompt-generation',target.generation??'',...(text!==null?['--question-text',text]:[])];
+        const result=JSON.parse((await exec('/usr/bin/python3',args,{timeout:20000})).stdout);
         if(result.error){
           settle(result.delivery==='uncertain'?{...request,status:'uncertain'}:null);
           if(same())this.sendError=result.error;
-        }else settle({...request,status:'sent'});
+        }else{
+          settle({...request,status:'sent'});
+          const editor=this.questionTextInputs?.get(this.questionTextKey(target,key));
+          if(text!==null&&editor?.input.value()===text){editor.input.set_value('');editor.hasText=false;}
+        }
       }catch(e){
         settle({...request,status:'uncertain'});
         if(same())this.sendError='Yanıtın iletilmesi doğrulanamadı. Tekrar seçmeden önce Terminal görünümünü kontrol edin.';
@@ -490,14 +519,20 @@ export default class MadlenChat extends View {
         .when(q.selected.length>0,e=>e.child(div().text_color(t.done).child(`Yanıt: ${q.selected.join(', ')}`)))
         .when(open,e=>e.children(q.options.map(o=>{
           const label=typeof o==='string'?o:o?.label??'',selected=q.selected.includes(label);
+          const editor=this.questionTextInputs?.get(this.questionTextKey(target,o?.key));
           return v_flex().id(`question-option-${m.id}-${o?.key??label}`).p(10).gap(4).rounded(10).border(1).border_color(selected?t.done:t.border).bg(t.canvas)
             .when(clickable&&o?.kind==='choice',e=>e.cursor_pointer().hover(s=>s.bg(t.hover)).on_click((_e,cx)=>this.answerQuestion(o.key,target,cx)))
-            .when(live&&o?.kind==='text',e=>e.cursor_pointer().hover(s=>s.bg(t.hover)).on_click(()=>this.back()))
-            .child(div().child(`${selected?'●':'○'}  ${label}`)).when(Boolean(o?.description),e=>e.child(div().text_size(12).text_color(t.dim).child(o.description)));
+            .when(clickable&&o?.kind==='text',e=>e.cursor_pointer().on_click((_e,cx)=>this.openQuestionText(o.key,target,cx)))
+            .child(div().child(`${selected?'●':'○'}  ${label}`)).when(Boolean(o?.description),e=>e.child(div().text_size(12).text_color(t.dim).child(o.description)))
+            .when(live&&o?.kind==='text'&&Boolean(editor),e=>e.child(v_flex().mt(6).gap(8)
+              .child(Textarea.new(editor.input).w_full().px(10).py(8).rounded(8).border(1).border_color(t.input??t.border).bg(t.surface).text_size(14).text_color(t.foreground))
+              .child(h_flex().gap(12).justify_between().items_center()
+                .child(div().text_size(11).text_color(t.dim).child('Enter gönderir · Shift+Enter yeni satır'))
+                .child(this.button(`question-text-send-${m.id}-${o.key}`,'Gönder →',cx=>this.answerQuestion(o.key,target,cx,editor.input.value()),Boolean(clickable&&editor.hasText))))));
         })))))
       .when(Boolean(m.answer_text)&&open,e=>e.child(div().text_size(12).text_color(t.muted).child(m.answer_text)))
       .when(qv.pending,e=>e.child(h_flex().gap(12).justify_between().items_center()
-        .child(div().min_w(0).text_size(12).text_color(t.dim).child(this.data?.cached?'Güncel soru durumu kontrol ediliyor…':reply?.status==='sending'?'Yanıt iletiliyor…':reply?.status==='sent'?'Yanıt iletildi · soru güncelleniyor…':reply?.status==='uncertain'?'Terminalden yanıt durumunu kontrol edin.':live?'Yanıtlamak için bir seçeneğe tıklayın.':'Yanıtınızı bu oturumun terminalinde verin.'))
+        .child(div().min_w(0).text_size(12).text_color(t.dim).child(this.data?.cached?'Güncel soru durumu kontrol ediliyor…':reply?.status==='sending'?'Yanıt iletiliyor…':reply?.status==='sent'?'Yanıt iletildi · soru güncelleniyor…':reply?.status==='uncertain'?'Terminalden yanıt durumunu kontrol edin.':live?'Bir seçeneğe tıklayın veya kendi yanıtınızı yazın.':'Yanıtınızı bu oturumun terminalinde verin.'))
         .when(!this.data?.cached,e=>e.child(this.button(`answer-${m.id}`,'Terminalde yanıtla →',()=>this.back(),true)))));
   }
   backgroundCard(activity,t){

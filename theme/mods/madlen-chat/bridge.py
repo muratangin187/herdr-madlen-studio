@@ -359,6 +359,7 @@ def records(path,kind,limit=None):
 RULE=re.compile(r'^[─━]{20,}$')
 DASHES=re.compile(r'^[╌┄-]{20,}$')
 OPTION=re.compile(r'^(?:❯\s*)?(\d)\.\s+(.*)$')
+QUESTION_OPTION=re.compile(r'^(?:❯\s*)?(\d)\.(?:\s+(.*))?$')
 
 
 def parse_prompt(screen,summary=''):
@@ -382,35 +383,40 @@ def parse_prompt(screen,summary=''):
     return dict(title=title,lines=text,code=code,question=question,options=options,summary=summary,fingerprint=fingerprint)
 
 
-def parse_question_prompt(screen):
+def parse_question_prompt(screen,text_key=None):
     """An open AskUserQuestion may not be persisted until the person answers it."""
     lines=[ANSI.sub('',line).strip() for line in screen.splitlines()]
     rules=[i for i,line in enumerate(lines) if RULE.fullmatch(line)]
-    if len(rules)<2 or not any('to select' in line and ('Enter' in line or 'Space' in line) for line in lines[rules[-1]+1:]):return None
+    if len(rules)<2 or not any(('to select' in line or 'Enter to submit' in line) and ('Enter' in line or 'Space' in line) for line in lines[rules[-1]+1:]):return None
     body=lines[rules[-2]+1:rules[-1]]
     text=[];options=[];selected=None
     for line in body:
         line=line.lstrip('│ ').strip()
         if not line:continue
-        match=OPTION.match(line)
+        match=QUESTION_OPTION.match(line)
         if match:
             if line.startswith('❯'):selected=match.group(1)
-            options.append(dict(key=match.group(1),label=match.group(2),description='',kind='choice'))
+            options.append(dict(key=match.group(1),label=match.group(2) or '',description='',kind='choice'))
         elif options:
             options[-1]['description']=' '.join(filter(None,(options[-1]['description'],line)))
         else:text.append(line)
     if not text or not options:return None
     title=text.pop(0).lstrip('☐☑□■ ').strip()
     question=' '.join(text) or title
+    if text_key is None and selected==options[-1]['key'] and not options[-1]['label'] and any('Enter to submit' in line for line in lines[rules[-1]+1:]):text_key=selected
+    input_empty=True
     for option in options:
-        if option['label'].rstrip('.')=='Type something':
-            option.update(label='Kendi yanıtınızı yazın (Terminal)',kind='text')
+        placeholder=option['label'].rstrip('. …') in ('Type something','')
+        if option['label'].rstrip('. …')=='Type something' or option['key']==text_key:
+            input_empty=placeholder and not option['description']
+            option.update(label='Kendi yanıtınızı yazın',kind='text',description='')
     fingerprint=hashlib.sha256(json.dumps([title,question,options],ensure_ascii=False).encode()).hexdigest()[:16]
-    single=selected is not None and any('Enter to select' in line for line in lines[rules[-1]+1:])
-    return dict(kind='question',title=title,question=question,options=options,fingerprint=fingerprint,selected_key=selected,can_answer=single)
+    text_selected=any(option['key']==selected and option['kind']=='text' for option in options)
+    single=selected is not None and any('Enter to select' in line or (text_selected and 'Enter to submit' in line) for line in lines[rules[-1]+1:])
+    return dict(kind='question',title=title,question=question,options=options,fingerprint=fingerprint,selected_key=selected,can_answer=bool(single),input_empty=input_empty)
 
 
-def blocked_prompt(address,t,kind):
+def blocked_prompt(address,t,kind,text_key=None):
     status=t.get('status') or {}
     if status.get('state')!='blocked':return None
     prompt=None
@@ -423,27 +429,32 @@ def blocked_prompt(address,t,kind):
         elif status.get('kind')=='question':
             try:
                 result=b.run(['hc','read',address,'--lines','0','--json'])
-                if result.returncode==0:prompt=parse_question_prompt(json.loads(result.stdout).get('text',''))
+                if result.returncode==0:prompt=parse_question_prompt(json.loads(result.stdout).get('text',''),text_key)
             except (OSError,ValueError,subprocess.TimeoutExpired):pass
     if prompt:prompt['generation']=str(t.get('status_ms') or '')
     return prompt or dict(kind='blocked',summary=str(status.get('msg') or 'Agent yanıtınızı bekliyor. Soruyu Terminal görünümünden kontrol edin.')[:5000])
 
 
-def answer_question(address,expected,fingerprint,key,generation=None):
-    """Navigate a freshly verified single-choice question, then verify again before Enter."""
+def answer_question(address,expected,fingerprint,key,generation=None,text=None):
+    """Verify the live question before submitting a choice or literal free-text answer."""
+    if text is not None:
+        text=text.replace('\r\n','\n').replace('\r','\n')
+        if not text.strip() or len(text)>10000 or re.search(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]',text):raise ValueError('Yanıt boş olamaz; en fazla 10.000 karakterlik düz metin yazın.')
+    active_text_key=None
     def current():
         terminal_data,kind,_=terminal(address)
         if kind!='claude' or not expected or process_key(terminal_data,kind)!=expected:
             raise ValueError('Agent işlemi değişti. Güncel sorudan tekrar seçim yapın.')
-        prompt=blocked_prompt(address,terminal_data,kind)
+        prompt=blocked_prompt(address,terminal_data,kind,active_text_key)
         if not prompt or prompt.get('kind')!='question' or prompt.get('fingerprint')!=fingerprint or not prompt.get('can_answer'):
             raise ValueError('Soru değişti veya artık açık değil. Sohbet yenileniyor.')
         return prompt
     prompt=current()
     if generation and prompt.get('generation')!=generation:raise ValueError('Yeni bir soru açıldı. Güncel sorudan tekrar seçim yapın.')
     keys=[option['key'] for option in prompt['options']]
-    if key not in keys or prompt['options'][keys.index(key)].get('kind')!='choice':
+    if key not in keys or prompt['options'][keys.index(key)].get('kind')!=('text' if text is not None else 'choice'):
         raise ValueError('Bu seçenek için Terminal görünümünü kullanın.')
+    if text is not None:active_text_key=key
     distance=keys.index(key)-keys.index(prompt['selected_key'])
     if distance:
         result=b.run(['hc','keys',address,*(['down' if distance>0 else 'up']*abs(distance))])
@@ -453,8 +464,11 @@ def answer_question(address,expected,fingerprint,key,generation=None):
         if prompt['selected_key']==key:break
         time.sleep(0.05)
     else:raise ValueError('Seçenek doğrulanamadı. Yanıt gönderilmedi; Terminal görünümünü kontrol edin.')
+    if text is not None and not prompt.get('input_empty'):raise ValueError('Terminaldeki serbest yanıt alanında metin var. Mevcut metni Terminal görünümünden kontrol edin.')
     try:
-        result=b.run(['hc','keys',address,'enter'])
+        # This explicit question-answer action alone may send to a blocked TUI.
+        # Bracketed paste preserves Turkish, emoji and newlines as literal text.
+        result=b.run(['hc','send','--force','--',address,text] if text is not None else ['hc','keys',address,'enter'])
         if result.returncode:raise ValueError('Enter iletilemedi.')
     except Exception:
         return dict(error='Yanıtın iletilip iletilmediği doğrulanamadı. Tekrar seçmeden önce Terminal görünümünü kontrol edin.',delivery='uncertain')
@@ -659,9 +673,9 @@ def steer_claude(address,original):
 
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--terminal',required=True);p.add_argument('--session');p.add_argument('--text');p.add_argument('--mode',choices=['normal','steer'],default='normal');p.add_argument('--attachments');p.add_argument('--limit',type=int);p.add_argument('--answer');p.add_argument('--question-answer');p.add_argument('--prompt-generation');p.add_argument('--fingerprint');p.add_argument('--cached',action='store_true');p.add_argument('--exit-agent',action='store_true');a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--terminal',required=True);p.add_argument('--session');p.add_argument('--text');p.add_argument('--mode',choices=['normal','steer'],default='normal');p.add_argument('--attachments');p.add_argument('--limit',type=int);p.add_argument('--answer');p.add_argument('--question-answer');p.add_argument('--question-text');p.add_argument('--prompt-generation');p.add_argument('--fingerprint');p.add_argument('--cached',action='store_true');p.add_argument('--exit-agent',action='store_true');a=p.parse_args()
     try:
-        result=(exit_agent(a.terminal,a.session) if a.exit_agent else answer_question(a.terminal,a.session,a.fingerprint,a.question_answer,a.prompt_generation) if a.question_answer is not None else answer(a.terminal,a.fingerprint,a.answer) if a.answer is not None
+        result=(exit_agent(a.terminal,a.session) if a.exit_agent else answer_question(a.terminal,a.session,a.fingerprint,a.question_answer,a.prompt_generation,a.question_text) if a.question_answer is not None else answer(a.terminal,a.fingerprint,a.answer) if a.answer is not None
                 else send(a.terminal,a.session,a.text,json.loads(a.attachments) if a.attachments else None,a.mode) if a.text is not None
                 else cached(a.terminal,a.limit) if a.cached else snapshot(a.terminal,a.limit))
         print(json.dumps(result,ensure_ascii=False))
