@@ -147,8 +147,15 @@ def item_text(item):
     return ""
 
 
-def projected_messages(root, sid, cwd, limit=LIMIT):
+def projected_messages(root, sid, cwd, limit=LIMIT, message_id=None):
     with database(root / "thread_history_1.sqlite") as db:
+        if message_id is not None:
+            rows = db.execute("""SELECT rollout_ordinal,created_at_ms,item_json FROM thread_items
+                WHERE thread_id=? AND item_type='agentMessage'
+                AND CAST(COALESCE(NULLIF(json_extract(item_json,'$.id'),''),rollout_ordinal) AS TEXT)=?""",
+                (sid, message_id)).fetchall()
+            return [dict(text=json.loads(raw).get('text',''),cwd=json.loads(raw).get('cwd') or cwd,
+                         ordinal=ordinal,at=at) for ordinal,at,raw in rows],len(rows)
         bounds = db.execute("SELECT rollout_ordinal FROM thread_items WHERE thread_id=? AND item_type IN ('userMessage','agentMessage') ORDER BY rollout_ordinal DESC LIMIT ?", (sid, limit)).fetchall()
         if not bounds:
             return [], 0
@@ -228,9 +235,11 @@ def reverse_json(path):
                 pass
 
 
-def log_messages(path, kind, cwd, limit=LIMIT):
+def log_messages(path, kind, cwd, limit=LIMIT, message_id=None):
     messages, count = [], 0
     for ordinal, record in enumerate(reverse_json(path)):
+        if message_id is not None and str(record.get('uuid') or ordinal) != message_id:
+            continue
         text, chat = "", False
         if kind == "codex":
             if record.get("type") != "response_item":
@@ -262,13 +271,13 @@ def log_messages(path, kind, cwd, limit=LIMIT):
         if chat:
             count += 1
         if text:
-            messages.append(dict(text=text, cwd=cwd, ordinal=-ordinal, at=record.get("timestamp")))
+            messages.append(dict(text=text, cwd=record.get('cwd') or cwd, ordinal=-ordinal, at=record.get("timestamp")))
         if count >= limit:
             break
     return messages, count
 
 
-def read_history(address, home=None):
+def read_history(address, home=None, message_id=None):
     if not address or "/" in address:
         raise ValueError("Bu panel yerel ajanın konuşmasını okuyabilir.")
     home = Path(home or Path.home())
@@ -290,10 +299,18 @@ def read_history(address, home=None):
         binding = codex_thread(pid, root, screen_text)
         if binding:
             sid, path, initial_cwd = binding
-            messages, count = projected_messages(root, sid, initial_cwd or cwd)
+            messages, count = projected_messages(root, sid, initial_cwd or cwd, message_id=message_id)
             return dict(messages=messages, message_count=count, session=sid, kind=kind)
     path = exact_log(pid, kind, home)
     if not path:
         raise ValueError("Seçili ajanın konuşması kesin olarak eşleştirilemedi. Ajanın bir yanıtı göründükten sonra Yenile'ye bas.")
-    messages, count = log_messages(path, kind, cwd)
-    return dict(messages=messages, message_count=count, session=path.stem, kind=kind)
+    messages, count = log_messages(path, kind, cwd, message_id=message_id)
+    sid = path.stem
+    if kind == 'codex':
+        try:
+            with path.open() as file: meta = json.loads(file.readline())
+            if meta.get('type') == 'session_meta':
+                sid = (meta.get('payload') or {}).get('id') or sid
+        except (OSError, ValueError):
+            pass
+    return dict(messages=messages, message_count=count, session=sid, kind=kind)

@@ -105,14 +105,24 @@ def collect(history):
 
 
 def execute(request):
-    history = binding.read_history(request['terminal'])
+    message = request.get('message')
+    history = (binding.read_history(request['terminal'], message_id=message) if message is not None
+               else binding.read_history(request['terminal']))
     result = collect(history)
     action = request.get('action', 'scan')
     if action == 'scan':
         return result
     if request.get('session') != result['session']:
         raise ValueError('Agentın oturumu değişti. Listeyi yenileyip tekrar deneyin.')
-    item = next((f for f in result['items'] if f['path'] == request.get('path')), None)
+    requested = request.get('path')
+    if message is not None:
+        # A clicked chat link may be relative, a file URI, or carry a line number.
+        # Resolve it only in the exact message, including messages older than the panel window.
+        paths = {str(path) for m in history['messages']
+                 if (path := resolve(requested or '', m.get('cwd'))) is not None}
+    else:
+        paths = {requested}
+    item = next((f for f in result['items'] if f['path'] in paths), None)
     if not item:
         raise ValueError('Dosya artık bu oturumun çıktıları arasında değil. Listeyi yenileyin.')
     path = Path(item['path'])
@@ -245,6 +255,7 @@ def main():
     parser.add_argument('--action', choices=['scan', 'preview', 'open', 'download'], default='scan')
     parser.add_argument('--session')
     parser.add_argument('--path')
+    parser.add_argument('--message', help='Exact assistant message containing a clicked chat link')
     args = vars(parser.parse_args())
     try:
         result = dispatch(args)

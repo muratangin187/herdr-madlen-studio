@@ -73,6 +73,19 @@ class OutputTests(unittest.TestCase):
         self.assertEqual(result['text'], text)
         self.assertFalse(result['truncated'])
 
+    def test_clicked_link_resolves_only_in_exact_message(self):
+        p=self.file('Türkçe rapor.html','<html>Fixture</html>')
+        for raw in (str(p)+':12',p.as_uri(),'Türkçe rapor.html'):
+            with patch.object(outputs.binding,'read_history',return_value=self.history(p)) as read,patch.object(outputs.subprocess,'run') as run:
+                outputs.execute(dict(terminal='t1',action='open',session='s',message='old-message',path=raw))
+                read.assert_called_once_with('t1',message_id='old-message')
+                self.assertEqual(run.call_args.args[0],['/usr/bin/open',str(p)])
+        other=self.file('other.html')
+        with patch.object(outputs.binding,'read_history',return_value=self.history(p)),patch.object(outputs.subprocess,'run') as run:
+            with self.assertRaisesRegex(ValueError,'arasında değil'):
+                outputs.execute(dict(terminal='t1',action='open',session='s',message='old-message',path=str(other)))
+            run.assert_not_called()
+
     def test_text_preview_is_bounded_and_binary_is_not_decoded(self):
         p = self.file('large.txt', 'a' * (outputs.MAX_TEXT + 10))
         with patch.object(outputs.binding, 'read_history', return_value=self.history(p)):
@@ -133,7 +146,7 @@ class OutputTests(unittest.TestCase):
         (self.root / '.claude/projects/fixture').mkdir(parents=True)
         (self.root / f'.claude/sessions/{os.getpid()}.json').write_text(json.dumps(dict(sessionId=sid)))
         report = self.file('Remote report.md', 'fixture')
-        (self.root / f'.claude/projects/fixture/{sid}.jsonl').write_text(json.dumps(dict(type='assistant',
+        (self.root / f'.claude/projects/fixture/{sid}.jsonl').write_text(json.dumps(dict(type='assistant',uuid='old-message',
             message=dict(role='assistant', content=[dict(type='text', text=f'[Report](<{report}>)')]))) + '\n')
         request = dict(terminal='t1', action='scan', remote=True, metadata=dict(foreground=dict(pid=os.getpid(), name='claude'),
                        status=dict(app='claude')), screen='', sources={
@@ -145,6 +158,13 @@ class OutputTests(unittest.TestCase):
         self.assertNotIn('error', result, result)
         self.assertEqual(result['session'], sid)
         self.assertEqual([i['path'] for i in result['items']], [str(report)])
+        request.update(action='download',session=sid,message='old-message',path=report.as_uri()+':12')
+        response=subprocess.run([sys.executable,'-c',outputs.WORKER],input=json.dumps(request),capture_output=True,
+                                text=True,timeout=10,env={**os.environ,'HOME':str(self.root)})
+        self.assertEqual(response.returncode,0,response.stderr)
+        result=json.loads(response.stdout)
+        self.assertNotIn('error',result,result)
+        self.assertEqual(base64.b64decode(result['blob']),b'fixture')
 
 
 if __name__ == '__main__':

@@ -1,9 +1,10 @@
 import { View, div, svg, image } from 'gpui-kit';
 import { h_flex, v_flex, TextView, Textarea, TextareaState } from 'gpui-base';
-import { theme, settings, layout, shared, setShared, spaces, panes, terminals, run, exec, appHome, props, openOverlay, closeOverlay, knownAgents, checking } from 'herdr';
+import { theme, settings, layout, shared, setShared, spaces, panes, terminals, run, exec, appHome, props, openOverlay, closeOverlay, knownAgents, checking, notify } from 'herdr';
 import { conversation, visibleMessages } from './turns.js';
 import { summarizeTool, summarizeGroup } from './tool-summary.js';
 import { makeOutgoing, reconcileOutgoing, outgoingFor, deliveryLabel, serializeOutbox, restoreOutbox } from './outbox.js';
+import { linkifyFiles, linkTarget } from './links.js';
 // Chat renders the newest PAGE messages (tools excluded); older ones load on request.
 const PAGE=40;
 // A `!` command's output shows this many lines until expanded.
@@ -13,6 +14,7 @@ export default class MadlenChat extends View {
   init(_props,cx) {
     this.previewWidth=800;this.previewHeight=600;if(props()?.preview)return;
     this.readOnly=checking();
+    this.openingLinks=new Set();this.linkStatus=null;
     this.exitFocus=cx.focus_handle();this.exitPending=false;this.exitError='';this.exitingTerminals=new Set();
     if(!this.readOnly)this.exitFocus.focus();
     this.imageDrafts={};this.outbox=restoreOutbox(localStorage.getItem('outbox.v1'));this.availableAgents=new Map();this.checkingAgents=new Set();this.launching=null;this.nextSend=0;this.pasting=false;this.staged={};this.limits={};this.raw=new Map();this.anchor=null;this.reload=new Set();this.answering=false;
@@ -320,13 +322,62 @@ export default class MadlenChat extends View {
       .on_mouse_down('left',(_e,cx)=>cx.stop_propagation()).on_click((_e,cx)=>{cx.stop_propagation();action(cx);})
       .child(svg(path).size(12));
   }
-  markdown(id,text){return TextView.markdown(`${this.data?.session??'loading'}-${id}`,text).scrollable(false).w_full().min_w(0).text_size(15).text_color(theme().foreground);}
+  openLink(url,context,cx){
+    if(this.readOnly||this.data?.cached||this.currentTarget()?.terminal!==context.terminal
+      ||this.target?.terminal!==context.terminal||this.data?.session!==context.session)return;
+    const destination=linkTarget(url);if(!destination)return;
+    const key=`${context.terminal}:${context.session}:${url}`;
+    if(this.openingLinks.has(key))return;
+    const remote=destination.kind==='file'&&context.terminal.includes('/');
+    const status={...context,busy:true,label:remote?'Dosya indiriliyor…':'Açılıyor…'};
+    this.linkStatus=status;this.openingLinks.add(key);cx.notify();
+    cx.spawn(async cx=>{
+      try{
+        if(destination.kind==='web'){
+          const result=await exec('/usr/bin/open',[destination.url],{timeout:15000});
+          if(result.code!==0)throw new Error(result.stderr||'Bağlantı açılamadı.');
+        }else{
+          const response=await exec('/usr/bin/python3',[`${appHome()}/mods/madlen-outputs/files.py`,
+            '--terminal',context.terminal,'--session',context.session,'--message',context.message,
+            '--path',destination.path,'--action',remote?'download':'open'],{timeout:40000});
+          const result=JSON.parse(response.stdout);
+          if(result.error||response.code!==0)throw new Error(result.error||'Dosya açılamadı.');
+          if(remote){
+            if(!result.downloaded_path)throw new Error('Dosyanın indirme konumu alınamadı.');
+            status.path=result.downloaded_path;status.label='İndirildi · Açılıyor…';cx.notify();
+            const opened=await exec('/usr/bin/open',[...(result.item?.kind==='archive'?['-R']:[]),status.path],{timeout:15000});
+            if(opened.code!==0)throw new Error(opened.stderr||'Dosya indirildi ancak uygulamada açılamadı.');
+          }
+        }
+        status.label=remote?'İndirildi · Açıldı':'Açıldı';
+      }catch(error){
+        status.error=true;status.label=String(error.message??error);
+        notify({title:status.path?'Dosya indirildi, açılamadı':'Bağlantı açılamadı',body:status.label,level:'error'});
+      }finally{status.busy=false;this.openingLinks.delete(key);cx.notify();}
+    });
+  }
+  linkFeedback(m,t){
+    const status=this.linkStatus;
+    if(!status||status.terminal!==this.target?.terminal||status.session!==this.data?.session||status.message!==m.id)return div();
+    return h_flex().gap(8).items_center().text_size(11.5).text_color(status.error?t.blocked:t.dim)
+      .when(status.busy,e=>e.child(svg('mods/madlen-chrome/spinner.svg').size(11).spin(900)))
+      .child(div().child(status.label))
+      .when(Boolean(status.path),e=>e.child(this.button(`reveal-link-${m.id}`,'İndirilenler’de göster',cx=>cx.spawn(async()=>{
+        await exec('/usr/bin/open',['-R',status.path],{timeout:15000});
+      }))));
+  }
+  markdown(id,text,message){
+    const context={...this.target,session:this.data?.session,message};
+    return TextView.markdown(`${this.data?.session??'loading'}-${id}`,linkifyFiles(text)).scrollable(false).w_full().min_w(0).text_size(15).text_color(theme().foreground)
+      .on_link_click((url,cx)=>this.openLink(url,context,cx));
+  }
   message(m,t) {
     const user=m.role==='user';
     return h_flex().id(`message-${m.id}`).w_full().max_w(this.columnWidth()).flex_none().items_start().when(user,e=>e.justify_end())
       .child(v_flex().min_w(0).max_w(user?this.columnWidth()*0.84:this.columnWidth()).when(!user,e=>e.flex_1().w_full()).gap(6).px(user?10:0).py(user?8:2).rounded(user?12:0).bg(user?'#5746db':t.canvas).text_color(user?'#ffffff':t.foreground).when(Boolean(m.queued||m.state==='queued'),e=>e.opacity(0.72))
         .child(m.shell?h_flex().gap(8).items_start().font_family(this.mono()).text_size(13.5).text_color('#ffffff').child(div().flex_none().opacity(0.7).child('!')).child(div().min_w(0).child(m.text))
-          :user?div().text_size(15).text_color('#ffffff').child(m.text||'Görsel eklendi'):this.markdown(`md-${m.id}`,m.text||''))
+          :user?div().text_size(15).text_color('#ffffff').child(m.text||'Görsel eklendi'):this.markdown(`md-${m.id}`,m.text||'',m.id))
+        .when(!user&&this.linkStatus?.message===m.id,e=>e.child(this.linkFeedback(m,t)))
         .when(Boolean(m.attachments?.length),e=>e.child(h_flex().flex_wrap().gap(8).children(m.attachments.map((a,i)=>this.thumbnail(a,`attachment-${m.id}-${i}`)))))
         .when(Boolean(m.optimistic),e=>e.child(this.outgoingStatus(m)))
         .when(Boolean(m.queued||m.midturn),e=>e.child(div().text_size(11.5).text_color('#ffffffb3').child(m.queued?'Sırada · agent bir sonraki adımda okuyacak':'İş sürerken gönderildi'))));
