@@ -102,6 +102,43 @@ function setup(){
 }
 
 {
+  // A restored first send must reconcile even after Claude wraps a long paste.
+  const h=setup(),{view,cx,requests,jobs}=h;
+  const initial={...snapshot('process:key'),kind:'claude',process_key:'process:key',unbound:true};
+  const item=makeOutgoing('pasted',{terminal:'ta',pane:'pa'},initial,'Birinci satır\nİkinci satır',[]);
+  item.state='sent';item.createdAt=5000;
+  view.outbox=outbox.restoreOutbox(outbox.serializeOutbox([item]));
+  const native={id:'native',role:'user',text:'\n\n<pasted_content id="abcd">\nBirinci satır\nİkinci satır\n</pasted_content id="abcd">\n',at:6000};
+  const completed={...snapshot('actual-session',[native,{id:'final',role:'assistant',text:'Tamamlandı',turn_status:'completed'}]),kind:'claude',process_key:'process:key',status:'done'};
+  view.refresh(cx);requests[0].resolve({stdout:JSON.stringify(completed)});await jobs[0];
+  assert.equal(view.outbox.length,0,'a restored wrapped paste clears the stale waiting bubble');
+  assert.equal(view.data.messages.filter(m=>m.id==='native').length,1);
+  h.setText('Sonraki mesaj');view.send(cx);
+  assert.equal(view.outbox[0].state,'sending','the next prompt sends immediately instead of remaining queued');
+  assert.ok(requests[1].args.includes('Sonraki mesaj'));
+}
+{
+  const text='Birinci satır\nİkinci satır';
+  const wrapped=body=>`<pasted_content id="abcd">\n${body}\n</pasted_content id="abcd">`;
+  const check=(native,kind='claude',mutate=()=>{})=>{
+    const item=makeOutgoing('paste',{terminal:'ta'},{...snapshot(),kind},text,[]);item.state='sent';mutate(item);
+    return reconcileOutgoing([item],{...snapshot('sa',[{id:'new',role:'user',text:native,at:6000}]),kind},'ta').length;
+  };
+  assert.equal(check(wrapped(text)),0);
+  assert.equal(check(wrapped(text).replace(/\n/g,'\r\n')),0,'pasted Windows line endings match');
+  assert.equal(check(wrapped(text).replace('</pasted_content id="abcd">','</pasted_content>')),0);
+  assert.equal(check(wrapped('başka metin')),1,'wrapper alone is not proof of delivery');
+  assert.equal(check(wrapped(text),'codex'),1,'Claude wrappers are not normalized for Codex');
+  assert.equal(check('önce '+wrapped(text)),1,'embedded pasted text is not a whole-message echo');
+  assert.equal(check(wrapped(text)+' sonra'),1);
+  assert.equal(check(wrapped(text).replace('</pasted_content id="abcd">','</pasted_content id="ffff">')),1,'mismatched IDs are not unwrapped');
+  assert.equal(check(wrapped(text),'claude',x=>x.state='queued'),1);
+  assert.equal(check(wrapped(text),'claude',x=>x.baseline.add('new')),1);
+  assert.equal(check(wrapped(text),'claude',x=>{x.unbound=true;x.createdAt=10000;}),1,'an old echo cannot acknowledge a new process send');
+  const literal=makeOutgoing('literal',{terminal:'ta'},{...snapshot(),kind:'claude'},wrapped(text),[]);literal.state='sent';
+  assert.equal(reconcileOutgoing([literal],snapshot('sa',[{id:'literal',role:'user',text:wrapped(text)}]),'ta').length,0,'literal wrapper text still matches exactly');
+}
+{
   const h=setup(),{view,cx,requests,jobs}=h;
   h.statuses.ta='working';view.data.status='working';
   h.setText('First queued message');view.send(cx);

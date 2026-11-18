@@ -1,5 +1,12 @@
 const normalize=text=>String(text??'').replace(/\r\n/g,'\n').trim();
 
+function claudePaste(text) {
+  // Claude stores long terminal pastes inside a whole-message wrapper. Only
+  // unwrap that envelope; preserve embedded tags and require matching IDs.
+  const match=text.match(/^<pasted_content id="([a-fA-F0-9]+)">\n([\s\S]*)\n<\/pasted_content(?: id="\1")?>$/);
+  return match?normalize(match[2]):text;
+}
+
 export function makeOutgoing(id,target,snapshot,text,attachments,shell=false) {
   return {id,terminal:target.terminal,pane:target.pane,session:snapshot.session,role:'user',optimistic:true,
     kind:snapshot.kind,process_key:snapshot.process_key,unbound:Boolean(snapshot.unbound),createdAt:Date.now(),mode:'normal',
@@ -18,7 +25,8 @@ function matches(item,message) {
     text=text.replace(/^(?:\[Image\s*#?\d+\]\s*)+/gi,'').trim();
     if((message.attachments?.length??0)<item.attachments.length)return false;
   }
-  return text===normalize(item.text);
+  const expected=normalize(item.text);
+  return text===expected || (item.kind==='claude' && claudePaste(text)===expected);
 }
 
 // One native user record may acknowledge only one locally submitted message.
