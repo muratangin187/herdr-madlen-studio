@@ -29,6 +29,10 @@ assert.equal(conversation([messages[0],messages.at(-1)],'idle').some(m=>m.role==
 assert.equal(conversation(messages.map(({turn_id,...m})=>m),'idle').filter(m=>m.role==='tools').length,2,'legacy tool groups stay consecutive');
 const midturn=[...messages.slice(0,3),{...meta,role:'user',id:'steer',text:'Human correction'},...messages.slice(3)];
 assert.equal(conversation(midturn,'idle').some(m=>m.role==='work'),false,'human corrections remain visible in chronological order');
+const local={id:'uncertain',role:'user',text:'Uncertain attempt',optimistic:true,state:'uncertain'};
+const withLocal=conversation([local,...messages],'idle');
+assert.deepEqual(withLocal.map(m=>m.id),['uncertain','u','work-turn','final'],'an old local attempt stays visible without preventing native work from folding');
+assert.equal(withLocal[0],local,'local row actions retain the original outbox object');
 for(const missing of [null,undefined,NaN,Infinity,-1])assert.equal(workLabel(missing),'Çalışma ayrıntıları');
 assert.equal(workLabel(0),'Worked for 0s');
 assert.equal(workLabel(3723000),'Worked for 1h 2m 3s');

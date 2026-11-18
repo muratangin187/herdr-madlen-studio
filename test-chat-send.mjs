@@ -139,6 +139,28 @@ function setup(){
   assert.equal(reconcileOutgoing([literal],snapshot('sa',[{id:'literal',role:'user',text:wrapped(text)}]),'ta').length,0,'literal wrapper text still matches exactly');
 }
 {
+  const {view,cx,requests}=setup();
+  const item=makeOutgoing('abandoned',{terminal:'ta'},snapshot(),'Original attempt',[]);item.state='uncertain';item.createdAt=2000;
+  const native=[{id:'first',role:'user',text:'Earlier',at:1000},
+    {id:'revised',role:'user',text:'Rewritten in the terminal',at:3000},
+    {id:'answer',role:'assistant',text:'Completed reply',at:4000}];
+  assert.equal(reconcileOutgoing([item],snapshot('sa',native),'ta').length,1,'a different terminal prompt never falsely confirms an uncertain send');
+  const timeline=outbox.mergeOutgoing(native,[item]);
+  assert.deepEqual(timeline.map(x=>x.id),['first','abandoned','revised','answer'],'old attempts stay before newer prompts and replies');
+  assert.equal(timeline[1],item,'rendered rows keep the original outbox identity for their actions');
+  assert.equal(native.length,3,'rendering does not mutate the transcript');
+  assert.equal(item.turn_id,undefined);
+  assert.deepEqual(outbox.mergeOutgoing(native,[{...item,id:'later',createdAt:5000},item]).map(x=>x.id),
+    ['first','abandoned','revised','answer','later']);
+  assert.equal(outbox.mergeOutgoing([{id:'legacy'}],[item]).at(-1).id,'abandoned','missing timestamps preserve native ordering');
+  view.outbox=[item];view.input.set_value('Next draft');
+  view.dismissOutgoing(timeline[1],cx);
+  assert.equal(view.outbox.length,0);assert.equal(view.input.value(),'Next draft');
+  assert.equal(requests.length,0,'dismissal never sends or retries the abandoned text');
+  item.state='sending';view.outbox=[item];view.dismissOutgoing(item,cx);assert.equal(view.outbox.length,1,'in-flight sends cannot be dismissed');
+  item.state='uncertain';view.data.session='other';view.dismissOutgoing(item,cx);assert.equal(view.outbox.length,1,'a stale action cannot change another session');
+}
+{
   const h=setup(),{view,cx,requests,jobs}=h;
   h.statuses.ta='working';view.data.status='working';
   h.setText('First queued message');view.send(cx);

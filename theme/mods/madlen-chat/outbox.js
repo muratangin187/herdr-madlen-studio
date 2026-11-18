@@ -57,6 +57,21 @@ export function outgoingFor(items,terminal,session) {
   return items.filter(item=>item.terminal===terminal && item.session===session && !item.observedId);
 }
 
+export function mergeOutgoing(messages,outgoing) {
+  // A failed/uncertain old attempt must not appear after newer native replies.
+  // Preserve transcript order; only insert local rows by their creation time.
+  const time=item=>Number.isFinite(item.createdAt)?item.createdAt:Infinity;
+  const pending=[...outgoing].sort((a,b)=>time(a)-time(b));
+  const result=[];let index=0;
+  const append=item=>result.push(item);
+  for(const message of messages){
+    if(Number.isFinite(message.at))while(index<pending.length&&time(pending[index])<=message.at)append(pending[index++]);
+    result.push(message);
+  }
+  while(index<pending.length)append(pending[index++]);
+  return result;
+}
+
 export function deliveryLabel(item) {
   if(item.state==='queued')return 'Sırada · mevcut çalışma tamamlanınca gönderilecek';
   if(item.state==='sending')return 'Gönderiliyor…';

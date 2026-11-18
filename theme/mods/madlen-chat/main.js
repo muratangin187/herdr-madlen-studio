@@ -3,7 +3,7 @@ import { h_flex, v_flex, TextView, Textarea, TextareaState } from 'gpui-base';
 import { theme, settings, layout, shared, setShared, spaces, panes, terminals, run, exec, appHome, props, openOverlay, closeOverlay, knownAgents, checking, notify } from 'herdr';
 import { conversation, visibleMessages } from './turns.js';
 import { summarizeTool, summarizeGroup } from './tool-summary.js';
-import { makeOutgoing, reconcileOutgoing, outgoingFor, deliveryLabel, serializeOutbox, restoreOutbox } from './outbox.js';
+import { makeOutgoing, reconcileOutgoing, outgoingFor, mergeOutgoing, deliveryLabel, serializeOutbox, restoreOutbox } from './outbox.js';
 import { linkifyFiles, linkTarget } from './links.js';
 // Chat renders the newest PAGE messages (tools excluded); older ones load on request.
 const PAGE=40;
@@ -298,6 +298,11 @@ export default class MadlenChat extends View {
     this.input.set_value(item.inputText);this.drafts[item.terminal]=item.inputText;
     this.imageDrafts[item.terminal]=item.attachments.map(a=>({...a}));this.outbox=this.outbox.filter(x=>x!==item);this.persistOutbox();this.sendError='';cx.notify();
   }
+  dismissOutgoing(item,cx){
+    if(this.readOnly||!['failed','uncertain'].includes(item.state)||this.currentTarget()?.terminal!==item.terminal
+      ||this.target?.terminal!==item.terminal||this.data?.session!==item.session)return;
+    this.outbox=this.outbox.filter(x=>x!==item);this.persistOutbox();cx.notify();this.pumpQueue(cx);
+  }
   outgoingStatus(item){
     const failed=['failed','uncertain'].includes(item.state);
     const action=(id,label,callback)=>div().id(id).px(7).py(3).rounded(5).bg('#ffffff1a').cursor_pointer()
@@ -312,7 +317,9 @@ export default class MadlenChat extends View {
       .when(item.state==='failed',e=>e.child(h_flex().gap(6)
         .child(action(`retry-${item.id}`,'Yeniden dene',cx=>this.retry(item,cx)))
         .child(action(`restore-${item.id}`,'Taslağa al',cx=>this.restore(item,cx)))))
-      .when(item.state==='uncertain',e=>e.child(action(`check-${item.id}`,'Terminalde kontrol et',()=>this.back())));
+      .when(item.state==='uncertain',e=>e.child(action(`check-${item.id}`,'Terminalde kontrol et',()=>this.back())))
+      .when(failed,e=>e.child(action(`dismiss-${item.id}`,'Bu denemeyi kaldır',cx=>this.dismissOutgoing(item,cx))
+        .tooltip('Yalnızca bu gönderim denemesini kaldırır; konuşma kaydını silmez ve bu denemeyi tekrar göndermez.')));
   }
   button(id,label,action,primary=false){const t=theme();return h_flex().id(id).h(30).px(12).gap(6).items_center().rounded(8).cursor_pointer().bg(primary?t.solid:t.surface).text_color(primary?t.solid_foreground:t.muted).hover(s=>s.bg(primary?t.accent:t.hover)).on_click((_e,cx)=>action(cx)).child(label);}
   iconButton(id,path,label,action,active=false){
@@ -553,7 +560,7 @@ export default class MadlenChat extends View {
     const waitingLabel=sending?'Mesaj iletiliyor…':'Yanıt bekleniyor…';
     const ready=data&&!data.cached&&!this.error&&!this.pasting&&!this.staged[target?.terminal]&&['idle','done','working'].includes(status);
     const shell=this.shellMode(this.input.value());this.shellDraft=shell;
-    const groups=conversation(data?.messages??[],data?.cached?data.status:status);
+    const groups=conversation(mergeOutgoing(data?.messages??[],outgoing),data?.cached?data.status:status);
 
     return v_flex().id('madlen-chat-root').track_focus(this.exitFocus).on_key_up((e,cx)=>this.exitKey(e,cx)).size_full().min_w(0).min_h(0).font_family('Helvetica Neue').text_size(14).text_color(t.foreground).bg(t.canvas)
       .on_mouse_up('left',()=>{this.dragging=false;}).on_hover(inside=>{if(!inside)this.dragging=false;})
@@ -584,7 +591,6 @@ export default class MadlenChat extends View {
           .when(Boolean(data?.unbound),e=>e.child(div().text_color(t.dim).child('İlk mesajınızı buradan gönderebilirsiniz. Geçmiş, oturum oluştukça burada görünecek.')))
           .when(Boolean(data?.more),e=>e.child(h_flex().w_full().max_w(this.columnWidth()).justify_center().child(this.button('chat-older',this.pending.has(target?.terminal)?'Yükleniyor…':'Daha eski mesajları göster',cx=>this.older(cx)))))
           .children(visibleMessages(groups,this.expanded).map(m=>this.part(m,t)))
-          .children(outgoing.map(m=>this.message(m,t)))
           .when(Boolean(data?.prompt)&&status==='blocked',e=>e.child(this.permission(data.prompt,t)))
           .when(Boolean(data),e=>e.child(h_flex().flex_none().gap(8).items_center().text_size(12).text_color(status==='working'||waiting?t.working:status==='blocked'?t.blocked:t.done)
             .when(status==='working'||waiting,e=>e.child(svg('mods/madlen-chrome/spinner.svg').size(12).spin(900)))

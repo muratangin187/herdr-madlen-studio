@@ -18,9 +18,9 @@ export function toolGroups(messages) {
 export function conversation(messages,liveStatus) {
   const blocks=[];
   for(const message of messages){
-    const last=blocks.at(-1);
-    if(last && last.id===message.turn_id)last.items.push(message);
-    else blocks.push({id:message.turn_id,items:[message]});
+    const last=blocks.at(-1),turn=message.optimistic?`outbox-${message.id}`:message.turn_id;
+    if(last && last.id===turn)last.items.push(message);
+    else blocks.push({id:turn,items:[message]});
   }
   return blocks.flatMap((block,index)=>{
     const items=block.items, meta=items.find(m=>m.turn_status==='completed' && m.final_id);
