@@ -1,7 +1,7 @@
 import { View, div, svg, image } from 'gpui-kit';
 import { h_flex, v_flex, TextView, Textarea, TextareaState } from 'gpui-base';
 import { theme, settings, layout, shared, setShared, spaces, panes, terminals, run, exec, appHome, props, openOverlay, closeOverlay, knownAgents, checking, notify } from 'herdr';
-import { conversation, visibleMessages, questionView, liveQuestionMessage } from './turns.js';
+import { conversation, visibleMessages, questionView, liveQuestionMessage, bindQuestionPrompt } from './turns.js';
 import { summarizeTool, summarizeGroup } from './tool-summary.js';
 import { makeOutgoing, reconcileOutgoing, outgoingFor, mergeOutgoing, deliveryLabel, serializeOutbox, restoreOutbox } from './outbox.js';
 import { linkifyFiles, linkTarget } from './links.js';
@@ -19,7 +19,7 @@ export default class MadlenChat extends View {
     this.exitFocus=cx.focus_handle();this.exitPending=false;this.exitError='';this.exitingTerminals=new Set();
     if(!this.readOnly)this.exitFocus.focus();
     this.imageDrafts={};this.outbox=restoreOutbox(localStorage.getItem('outbox.v1'));this.availableAgents=new Map();this.checkingAgents=new Set();this.launching=null;this.nextSend=0;this.pasting=false;this.staged={};this.limits={};this.raw=new Map();this.anchor=null;this.reload=new Set();this.answering=false;
-    this.dragging=false;this.offset=0;this.viewport=400;this.viewportWidth=1000;this.contentHeight=400;this.follow=true;this.historyKey=0;this.data=null;this.error='';this.sendError='';this.pending=new Set();this.cache=new Map();this.positions=new Map();this.expanded={};this.drafts={};this.target=null;
+    this.dragging=false;this.offset=0;this.viewport=400;this.viewportWidth=1000;this.contentHeight=400;this.follow=true;this.historyKey=0;this.data=null;this.error='';this.sendError='';this.pending=new Set();this.cache=new Map();this.positions=new Map();this.expanded={};this.drafts={};this.target=null;this.questionReplies=new Map();
     this.diskLoaded=new Set();this.updated=new Map();this.reports=new Map();this.background=null;
     this.input=TextareaState.new({placeholder:'Mesajınızı yazın…',rows:1});
     this.input.set_auto_grow(1,4);
@@ -127,6 +127,8 @@ export default class MadlenChat extends View {
         }
         const data=JSON.parse(r.stdout);
         if(data.error)throw new Error(data.error);
+        const reply=this.questionReplies?.get(target.terminal);
+        if(reply?.terminal===target.terminal&&(reply.process!==data.process_key||reply.fingerprint!==data.prompt?.fingerprint||reply.generation!==data.prompt?.generation||data.status!=='blocked'))this.questionReplies.delete(target.terminal);
         if(this.outbox?.length){this.outbox=reconcileOutgoing(this.outbox,data,target.terminal);this.persistOutbox();}
         this.raw.set(target.terminal,r.stdout);if(older)this.anchor.ready=true;
         const staged=this.staged[target.terminal];
@@ -193,6 +195,27 @@ export default class MadlenChat extends View {
         const result=JSON.parse(r.stdout);if(result.error)throw new Error(result.error);
       }catch(e){if(this.target?.terminal===target.terminal)this.sendError=String(e.message??e);}
       finally{this.answering=false;this.refresh(cx,true);cx.notify();}
+    });
+  }
+  answerQuestion(key,target,cx){
+    const data=this.data;
+    this.questionReplies??=new Map();
+    if(this.answering||this.questionReplies.has(target.terminal)||data?.cached||this.error||this.target?.terminal!==target.terminal||data?.process_key!==target.process||data?.prompt?.fingerprint!==target.fingerprint||data?.prompt?.generation!==target.generation)return;
+    const request={...target,key,status:'sending'};
+    this.answering=true;this.sendError='';this.questionReplies.set(target.terminal,request);cx.notify();
+    const same=()=>this.target?.terminal===target.terminal&&this.data?.process_key===target.process&&this.data?.prompt?.fingerprint===target.fingerprint&&this.data?.prompt?.generation===target.generation;
+    const settle=value=>{if(this.questionReplies.get(target.terminal)===request){if(value)this.questionReplies.set(target.terminal,value);else this.questionReplies.delete(target.terminal);}};
+    cx.spawn(async cx=>{
+      try{
+        const result=JSON.parse((await exec('/usr/bin/python3',[`${appHome()}/mods/madlen-chat/bridge.py`,'--terminal',target.terminal,'--session',target.process,'--question-answer',key,'--fingerprint',target.fingerprint,'--prompt-generation',target.generation??''],{timeout:20000})).stdout);
+        if(result.error){
+          settle(result.delivery==='uncertain'?{...request,status:'uncertain'}:null);
+          if(same())this.sendError=result.error;
+        }else settle({...request,status:'sent'});
+      }catch(e){
+        settle({...request,status:'uncertain'});
+        if(same())this.sendError='Yanıtın iletilmesi doğrulanamadı. Tekrar seçmeden önce Terminal görünümünü kontrol edin.';
+      }finally{this.answering=false;this.refresh(cx,true);cx.notify();}
     });
   }
   // Same count as Claude Code's status line (context_window.used_percentage).
@@ -448,7 +471,13 @@ export default class MadlenChat extends View {
       .child(div().child(group.label)).child(div().text_size(10).child(open?'▾':'▸'));
   }
   question(m,t){
+    m=bindQuestionPrompt(m,this.data?.prompt);
     const qv=questionView(m),key=`question-${m.id}`,open=this.expanded[key]??qv.pending;
+    const target={terminal:this.target?.terminal,process:this.data?.process_key,fingerprint:m.live_fingerprint,generation:this.data?.prompt?.generation};
+    const live=Boolean(m.can_answer&&target.terminal&&target.process&&this.data?.prompt?.fingerprint===m.live_fingerprint&&!this.data?.cached&&!this.error);
+    const savedReply=this.questionReplies?.get(target.terminal);
+    const reply=savedReply?.fingerprint===target.fingerprint&&savedReply?.process===target.process&&savedReply?.generation===target.generation?savedReply:null;
+    const clickable=live&&!this.answering&&!reply;
     const color=qv.pending?t.accent:qv.answered?t.done:t.dim;
     return v_flex().id(key).flex_none().w_full().max_w(this.columnWidth()).min_w(0).p(16).gap(10).rounded(14).border(1).border_color(qv.pending?t.accent+'66':t.border).bg(qv.pending?t.selected:t.surface)
       .child(h_flex().id(`toggle-${key}`).justify_between().gap(12).items_center().cursor_pointer()
@@ -461,12 +490,14 @@ export default class MadlenChat extends View {
         .when(q.selected.length>0,e=>e.child(div().text_color(t.done).child(`Yanıt: ${q.selected.join(', ')}`)))
         .when(open,e=>e.children(q.options.map(o=>{
           const label=typeof o==='string'?o:o?.label??'',selected=q.selected.includes(label);
-          return v_flex().p(10).gap(4).rounded(10).border(1).border_color(selected?t.done:t.border).bg(t.canvas)
+          return v_flex().id(`question-option-${m.id}-${o?.key??label}`).p(10).gap(4).rounded(10).border(1).border_color(selected?t.done:t.border).bg(t.canvas)
+            .when(clickable&&o?.kind==='choice',e=>e.cursor_pointer().hover(s=>s.bg(t.hover)).on_click((_e,cx)=>this.answerQuestion(o.key,target,cx)))
+            .when(live&&o?.kind==='text',e=>e.cursor_pointer().hover(s=>s.bg(t.hover)).on_click(()=>this.back()))
             .child(div().child(`${selected?'●':'○'}  ${label}`)).when(Boolean(o?.description),e=>e.child(div().text_size(12).text_color(t.dim).child(o.description)));
         })))))
       .when(Boolean(m.answer_text)&&open,e=>e.child(div().text_size(12).text_color(t.muted).child(m.answer_text)))
       .when(qv.pending,e=>e.child(h_flex().gap(12).justify_between().items_center()
-        .child(div().min_w(0).text_size(12).text_color(t.dim).child(this.data?.cached?'Güncel soru durumu kontrol ediliyor…':'Yanıtınızı bu oturumun terminalinde verin.'))
+        .child(div().min_w(0).text_size(12).text_color(t.dim).child(this.data?.cached?'Güncel soru durumu kontrol ediliyor…':reply?.status==='sending'?'Yanıt iletiliyor…':reply?.status==='sent'?'Yanıt iletildi · soru güncelleniyor…':reply?.status==='uncertain'?'Terminalden yanıt durumunu kontrol edin.':live?'Yanıtlamak için bir seçeneğe tıklayın.':'Yanıtınızı bu oturumun terminalinde verin.'))
         .when(!this.data?.cached,e=>e.child(this.button(`answer-${m.id}`,'Terminalde yanıtla →',()=>this.back(),true)))));
   }
   backgroundCard(activity,t){

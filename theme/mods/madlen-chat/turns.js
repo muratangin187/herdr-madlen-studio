@@ -28,13 +28,21 @@ export function questionView(message) {
   return {state,pending,answered,questions,label:pending?'Yanıt bekliyor':answered?'Yanıtlandı':state==='failed'?'Tamamlanmadı':'Geçmiş soru'};
 }
 
+const sameQuestion=(question,text)=>String(question.question??question.title??'').replace(/\s+/g,' ').trim()===String(text??'').replace(/\s+/g,' ').trim();
+
+export function bindQuestionPrompt(message,prompt) {
+  if(prompt?.kind!=='question'||message.role!=='question'||message.question_state!=='pending'||!message.questions?.some(q=>sameQuestion(q,prompt.question)))return message;
+  return {...message,live_fingerprint:prompt.fingerprint,can_answer:Boolean(prompt.can_answer),
+    questions:message.questions.map(q=>sameQuestion(q,prompt.question)?{...q,options:prompt.options}:q)};
+}
+
 export function liveQuestionMessage(prompt,messages=[]) {
   if(!prompt||!['question','blocked'].includes(prompt.kind))return null;
   const question=prompt.question??prompt.summary??'Agent yanıtınızı bekliyor.';
-  const normalize=text=>String(text??'').replace(/\s+/g,' ').trim();
   if(prompt.kind==='question'&&messages.some(m=>m.role==='question'&&m.question_state==='pending'&&
-    m.questions?.some(q=>normalize(q.question??q.title)===normalize(question))))return null;
+    m.questions?.some(q=>sameQuestion(q,question))))return null;
   return {id:`live-${prompt.fingerprint??'blocked'}`,role:'question',question_state:'pending',status:'inProgress',
+    live_fingerprint:prompt.fingerprint,can_answer:Boolean(prompt.can_answer),
     questions:[{question,options:prompt.options??[]}]};
 }
 

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 const turns=await import('data:text/javascript;base64,'+Buffer.from(fs.readFileSync(new URL('./theme/mods/madlen-chat/turns.js',import.meta.url))).toString('base64'));
-const {questionView,conversation,visibleMessages,liveQuestionMessage}=turns;
+const {questionView,conversation,visibleMessages,liveQuestionMessage,bindQuestionPrompt}=turns;
 const question={id:'q',role:'question',status:'inProgress',question_state:'pending',questions:[{id:'color',question:'Renk?',options:[{label:'Açık'},{label:'Koyu'}]}]};
 assert.equal(questionView(question).label,'Yanıt bekliyor');
 const answered={...question,question_state:'answered',answers:{'Renk?':'Koyu'}};
@@ -28,7 +28,7 @@ function element(){
 }
 const source=fs.readFileSync(new URL('./theme/mods/madlen-chat/main.js',import.meta.url),'utf8')
   .replace(/^import .*;\n/gm,'').replace('export default class MadlenChat','globalThis.MadlenChat=class MadlenChat');
-const context={View:class {},questionView,liveQuestionMessage,div:element,h_flex:element,v_flex:element};
+const context={View:class {},questionView,liveQuestionMessage,bindQuestionPrompt,div:element,h_flex:element,v_flex:element};
 vm.createContext(context);vm.runInContext(source,context);
 const view=new context.MadlenChat();Object.assign(view,{viewportWidth:800,expanded:{},data:{cached:false}});
 view.button=(_id,label)=>element().child(label);
@@ -51,4 +51,35 @@ assert.match(text(card),/Testi nerede yapalım/);assert.match(text(card),/Ayrı 
 assert.match(text(card),/Terminalde yanıtla/);
 assert.equal(liveQuestionMessage(livePrompt,[{...question,questions:[{question:'Testi nerede\nyapalım?'}]}]),null,'a recorded pending question is not duplicated');
 assert.match(text(view.blockedPrompt({kind:'blocked',summary:'Bekleyen işlem için bir seçim gerekiyor.'},theme)),/Bekleyen işlem için bir seçim gerekiyor/);
+const requests=[],jobs=[];
+context.appHome=()=>'/fixture';context.exec=(_bin,args)=>new Promise((resolve,reject)=>requests.push({args,resolve,reject}));
+const cx={notify(){},spawn(fn){jobs.push(fn(this));}};
+const interactive={...livePrompt,can_answer:true,generation:'100',options:[{key:'1',kind:'choice',label:'Ayrı ortam',description:'Yeni bir örnekle çalış.'}]};
+view.target={terminal:'t1'};view.data={process_key:'process-fixture',prompt:interactive,messages:[]};view.refresh=()=>{};
+const choice=node=>node.nodes?.flatMap(n=>typeof n==='object'?[n,...(choice(n)??[])]:[])??[];
+const click=()=>{
+  const nodes=choice(view.blockedPrompt(interactive,theme));
+  const option=nodes.find(n=>text(n).startsWith('○  Ayrı ortam')&&n.events.click);
+  return option?.events.click({},cx);
+};
+click();click();
+assert.equal(requests.length,1,'double click starts only one answer');
+assert.ok(requests[0].args.includes('--question-answer'));assert.ok(requests[0].args.includes('process-fixture'));
+requests[0].resolve({stdout:'{"ok":true}'});await jobs[0];
+assert.equal(view.questionReplies.get('t1').status,'sent');
+click();assert.equal(requests.length,1,'a sent choice stays disabled until the question changes');
+view.questionReplies.clear();click();requests[1].reject(Error('timeout'));await jobs[1];
+assert.equal(view.questionReplies.get('t1').status,'uncertain');click();assert.equal(requests.length,2,'uncertain answers are not sent again');
+view.questionReplies.clear();view.sendError='';view.data.cached=true;assert.equal(click(),undefined);assert.equal(requests.length,2);
+view.data.cached=false;
+const bound=bindQuestionPrompt({...question,questions:[{question:interactive.question}]},interactive);
+assert.equal(bound.can_answer,true,'a question already in the transcript also gets live controls');
+assert.equal(bound.questions[0].options[0].key,'1');
+view.answerQuestion('1',{terminal:'t1',process:'old-process',fingerprint:interactive.fingerprint,generation:'100'},cx);
+assert.equal(requests.length,2,'a stale process never receives a choice');
+view.questionReplies.set('other-terminal',{status:'uncertain'});
+click();assert.equal(requests.length,3,'an uncertain answer in a different terminal does not block this question');
+requests[2].resolve({stdout:'{"error":"Question changed","delivery":"not_sent"}'});await jobs[2];
+assert.equal(view.questionReplies.has('t1'),false,'a definite pre-send failure permits a fresh attempt');
+assert.equal(view.questionReplies.get('other-terminal').status,'uncertain');
 console.log('PASS: question visibility, answers, compact cards, selected options, disclosure, cache guard and free-text questions');

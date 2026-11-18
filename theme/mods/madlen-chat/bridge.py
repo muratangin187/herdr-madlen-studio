@@ -388,13 +388,14 @@ def parse_question_prompt(screen):
     rules=[i for i,line in enumerate(lines) if RULE.fullmatch(line)]
     if len(rules)<2 or not any('to select' in line and ('Enter' in line or 'Space' in line) for line in lines[rules[-1]+1:]):return None
     body=lines[rules[-2]+1:rules[-1]]
-    text=[];options=[]
+    text=[];options=[];selected=None
     for line in body:
         line=line.lstrip('│ ').strip()
         if not line:continue
         match=OPTION.match(line)
         if match:
-            options.append(dict(key=match.group(1),label=match.group(2),description=''))
+            if line.startswith('❯'):selected=match.group(1)
+            options.append(dict(key=match.group(1),label=match.group(2),description='',kind='choice'))
         elif options:
             options[-1]['description']=' '.join(filter(None,(options[-1]['description'],line)))
         else:text.append(line)
@@ -402,9 +403,11 @@ def parse_question_prompt(screen):
     title=text.pop(0).lstrip('☐☑□■ ').strip()
     question=' '.join(text) or title
     for option in options:
-        if option['label'].rstrip('.')=='Type something':option['label']='Kendi yanıtınızı yazın (Terminal)'
+        if option['label'].rstrip('.')=='Type something':
+            option.update(label='Kendi yanıtınızı yazın (Terminal)',kind='text')
     fingerprint=hashlib.sha256(json.dumps([title,question,options],ensure_ascii=False).encode()).hexdigest()[:16]
-    return dict(kind='question',title=title,question=question,options=options,fingerprint=fingerprint)
+    single=selected is not None and any('Enter to select' in line for line in lines[rules[-1]+1:])
+    return dict(kind='question',title=title,question=question,options=options,fingerprint=fingerprint,selected_key=selected,can_answer=single)
 
 
 def blocked_prompt(address,t,kind):
@@ -422,7 +425,40 @@ def blocked_prompt(address,t,kind):
                 result=b.run(['hc','read',address,'--lines','0','--json'])
                 if result.returncode==0:prompt=parse_question_prompt(json.loads(result.stdout).get('text',''))
             except (OSError,ValueError,subprocess.TimeoutExpired):pass
+    if prompt:prompt['generation']=str(t.get('status_ms') or '')
     return prompt or dict(kind='blocked',summary=str(status.get('msg') or 'Agent yanıtınızı bekliyor. Soruyu Terminal görünümünden kontrol edin.')[:5000])
+
+
+def answer_question(address,expected,fingerprint,key,generation=None):
+    """Navigate a freshly verified single-choice question, then verify again before Enter."""
+    def current():
+        terminal_data,kind,_=terminal(address)
+        if kind!='claude' or not expected or process_key(terminal_data,kind)!=expected:
+            raise ValueError('Agent işlemi değişti. Güncel sorudan tekrar seçim yapın.')
+        prompt=blocked_prompt(address,terminal_data,kind)
+        if not prompt or prompt.get('kind')!='question' or prompt.get('fingerprint')!=fingerprint or not prompt.get('can_answer'):
+            raise ValueError('Soru değişti veya artık açık değil. Sohbet yenileniyor.')
+        return prompt
+    prompt=current()
+    if generation and prompt.get('generation')!=generation:raise ValueError('Yeni bir soru açıldı. Güncel sorudan tekrar seçim yapın.')
+    keys=[option['key'] for option in prompt['options']]
+    if key not in keys or prompt['options'][keys.index(key)].get('kind')!='choice':
+        raise ValueError('Bu seçenek için Terminal görünümünü kullanın.')
+    distance=keys.index(key)-keys.index(prompt['selected_key'])
+    if distance:
+        result=b.run(['hc','keys',address,*(['down' if distance>0 else 'up']*abs(distance))])
+        if result.returncode:raise ValueError('Seçenek değiştirilemedi. Yanıt gönderilmedi.')
+    for _ in range(10):
+        prompt=current()
+        if prompt['selected_key']==key:break
+        time.sleep(0.05)
+    else:raise ValueError('Seçenek doğrulanamadı. Yanıt gönderilmedi; Terminal görünümünü kontrol edin.')
+    try:
+        result=b.run(['hc','keys',address,'enter'])
+        if result.returncode:raise ValueError('Enter iletilemedi.')
+    except Exception:
+        return dict(error='Yanıtın iletilip iletilmediği doğrulanamadı. Tekrar seçmeden önce Terminal görünümünü kontrol edin.',delivery='uncertain')
+    return dict(ok=True,delivery='answered')
 
 
 def permission_prompt(address,t):
@@ -623,15 +659,15 @@ def steer_claude(address,original):
 
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--terminal',required=True);p.add_argument('--session');p.add_argument('--text');p.add_argument('--mode',choices=['normal','steer'],default='normal');p.add_argument('--attachments');p.add_argument('--limit',type=int);p.add_argument('--answer');p.add_argument('--fingerprint');p.add_argument('--cached',action='store_true');p.add_argument('--exit-agent',action='store_true');a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--terminal',required=True);p.add_argument('--session');p.add_argument('--text');p.add_argument('--mode',choices=['normal','steer'],default='normal');p.add_argument('--attachments');p.add_argument('--limit',type=int);p.add_argument('--answer');p.add_argument('--question-answer');p.add_argument('--prompt-generation');p.add_argument('--fingerprint');p.add_argument('--cached',action='store_true');p.add_argument('--exit-agent',action='store_true');a=p.parse_args()
     try:
-        result=(exit_agent(a.terminal,a.session) if a.exit_agent else answer(a.terminal,a.fingerprint,a.answer) if a.answer is not None
+        result=(exit_agent(a.terminal,a.session) if a.exit_agent else answer_question(a.terminal,a.session,a.fingerprint,a.question_answer,a.prompt_generation) if a.question_answer is not None else answer(a.terminal,a.fingerprint,a.answer) if a.answer is not None
                 else send(a.terminal,a.session,a.text,json.loads(a.attachments) if a.attachments else None,a.mode) if a.text is not None
                 else cached(a.terminal,a.limit) if a.cached else snapshot(a.terminal,a.limit))
         print(json.dumps(result,ensure_ascii=False))
     except Exception as e:
         result=dict(error=str(e))
-        if a.text is not None:result['delivery']='not_sent'
+        if a.text is not None or a.question_answer is not None:result['delivery']='not_sent'
         print(json.dumps(result,ensure_ascii=False));return 1
     return 0
 

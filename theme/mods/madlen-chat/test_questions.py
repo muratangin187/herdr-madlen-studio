@@ -53,6 +53,72 @@ class QuestionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'İzin isteği değişti'):bridge.answer('t1',fingerprint,'1')
             run.assert_not_called()
 
+    def answer_fixture(self,selected='1',change_after_move=False,move=True,enter_ok=True,address='t1'):
+        terminal=dict(created_ms=1,pid=10,status_ms=100,status=dict(state='blocked',kind='question'),foreground=dict(pid=123,argv=['claude']))
+        state=dict(selected=selected,changed=False);calls=[]
+        def screen():
+            text=self.SCREEN.replace('❯ 1.','  1.')
+            text=text.replace('  '+state['selected']+'.','❯ '+state['selected']+'.')
+            return text.replace('Testi hangi ortamda yapalım?','Yeni bir soru?') if state['changed'] else text
+        fingerprint=bridge.parse_question_prompt(screen())['fingerprint']
+        def run(args):
+            calls.append(args)
+            if args[:2]==['hc','read']:return SimpleNamespace(returncode=0,stdout=json.dumps(dict(text=screen())))
+            self.assertEqual(args[:3],['hc','keys',address])
+            if args[3:]!=['enter']:
+                if move:state['selected']=str(int(state['selected'])+sum(1 if key=='down' else -1 for key in args[3:]))
+                if change_after_move:state['changed']=True
+            return SimpleNamespace(returncode=0 if enter_ok or args[3:]!=['enter'] else 1,stdout='')
+        return terminal,fingerprint,run,calls
+
+    def test_click_selects_and_verifies_target_before_enter(self):
+        for address in ('t1','box/t1'):
+            terminal,fingerprint,run,calls=self.answer_fixture(address=address)
+            with patch.object(bridge,'terminal',return_value=(terminal,'claude',123)),patch.object(bridge.b,'run',side_effect=run):
+                result=bridge.answer_question(address,bridge.process_key(terminal,'claude'),fingerprint,'2','100')
+            self.assertTrue(result['ok'])
+            keys=[call for call in calls if call[:2]==['hc','keys']]
+            self.assertEqual(keys,[['hc','keys',address,'down'],['hc','keys',address,'enter']])
+            self.assertEqual(calls[-2][:2],['hc','read'],'fresh screen verification immediately precedes Enter')
+
+    def test_click_current_selection_only_submits_once(self):
+        terminal,fingerprint,run,calls=self.answer_fixture()
+        with patch.object(bridge,'terminal',return_value=(terminal,'claude',123)),patch.object(bridge.b,'run',side_effect=run):
+            bridge.answer_question('t1',bridge.process_key(terminal,'claude'),fingerprint,'1')
+        self.assertEqual([call for call in calls if call[:2]==['hc','keys']],[['hc','keys','t1','enter']])
+
+    def test_changed_question_after_navigation_never_gets_enter(self):
+        terminal,fingerprint,run,calls=self.answer_fixture(change_after_move=True)
+        with patch.object(bridge,'terminal',return_value=(terminal,'claude',123)),patch.object(bridge.b,'run',side_effect=run):
+            with self.assertRaisesRegex(ValueError,'Soru değişti'):bridge.answer_question('t1',bridge.process_key(terminal,'claude'),fingerprint,'2')
+        self.assertNotIn(['hc','keys','t1','enter'],calls)
+
+    def test_unconfirmed_selection_never_gets_enter(self):
+        terminal,fingerprint,run,calls=self.answer_fixture(move=False)
+        with patch.object(bridge,'terminal',return_value=(terminal,'claude',123)),patch.object(bridge.b,'run',side_effect=run),patch.object(bridge.time,'sleep'):
+            with self.assertRaisesRegex(ValueError,'Seçenek doğrulanamadı'):bridge.answer_question('t1',bridge.process_key(terminal,'claude'),fingerprint,'2')
+        self.assertNotIn(['hc','keys','t1','enter'],calls)
+
+    def test_old_process_and_question_generation_never_submit(self):
+        terminal,fingerprint,run,calls=self.answer_fixture()
+        with patch.object(bridge,'terminal',return_value=(terminal,'claude',123)),patch.object(bridge.b,'run',side_effect=run):
+            for expected,generation in [('old-process','100'),(bridge.process_key(terminal,'claude'),'old-generation')]:
+                with self.assertRaises(ValueError):bridge.answer_question('t1',expected,fingerprint,'2',generation)
+        self.assertFalse(any(call[:2]==['hc','keys'] for call in calls))
+
+    def test_free_text_choice_does_not_paste_or_send_keys(self):
+        terminal,fingerprint,run,calls=self.answer_fixture()
+        with patch.object(bridge,'terminal',return_value=(terminal,'claude',123)),patch.object(bridge.b,'run',side_effect=run):
+            with self.assertRaisesRegex(ValueError,'Terminal görünümünü'):bridge.answer_question('t1',bridge.process_key(terminal,'claude'),fingerprint,'3')
+        self.assertFalse(any(call[:2]==['hc','keys'] for call in calls))
+
+    def test_enter_failure_is_uncertain_and_never_replayed(self):
+        terminal,fingerprint,run,calls=self.answer_fixture(enter_ok=False)
+        with patch.object(bridge,'terminal',return_value=(terminal,'claude',123)),patch.object(bridge.b,'run',side_effect=run):
+            result=bridge.answer_question('t1',bridge.process_key(terminal,'claude'),fingerprint,'2')
+        self.assertEqual(result['delivery'],'uncertain')
+        self.assertEqual(calls.count(['hc','keys','t1','enter']),1)
+
     def read(self,rows,kind='claude',limit=None):
         with tempfile.TemporaryDirectory() as folder:
             path=Path(folder)/'fixture.jsonl'
