@@ -64,4 +64,13 @@ function setup(){
   h.statuses.tc='working';view.prefetch(cx);
   assert.equal(requests[7].args[2],'tc','a live status transition wakes the cache immediately');
 }
-console.log('PASS: disk-first rendering, live/disk races, session isolation, provisional-send guard, background priority, single-flight prefetch, status wakeup and error throttling');
+{
+  const h=setup(),{view,cx,requests,jobs}=h;h.hide();
+  for(const terminal of ['ta','tb','tc']){h.statuses[terminal]='idle';view.reports.set(terminal,'idle');view.updated.set(terminal,100000);}
+  view.cache.set('ta',{...data(),background:{jobs:[{id:'shell',status:'running'}]}});
+  h.advance(6001);view.prefetch(cx);
+  assert.equal(requests.length,1);assert.equal(requests[0].args[2],'ta','an idle assistant with a live shell still refreshes promptly');
+  requests[0].resolve({stdout:JSON.stringify({...data(),background:{jobs:[]}})});await jobs[0];
+  assert.equal(requests.length,1,'completed background work returns to the normal idle refresh interval');
+}
+console.log('PASS: disk-first rendering, live/disk races, session isolation, provisional-send guard, background priority, single-flight prefetch, status wakeup, error throttling and idle shell refresh');

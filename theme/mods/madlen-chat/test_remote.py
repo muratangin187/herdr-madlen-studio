@@ -22,15 +22,18 @@ class RemoteTests(unittest.TestCase):
             (home/f'.claude/sessions/{os.getpid()}.json').write_text(json.dumps({'sessionId':sid}))
             (home/f'.claude/projects/test/{sid}.jsonl').write_text(json.dumps({'type':'assistant','message':{'role':'assistant','content':[{'type':'text','text':'Remote fixture response'}]}})+'\n')
             folder=Path(remote.__file__).parent
-            request=dict(address='t1',terminal={'foreground':{'pid':os.getpid()},'status':{'state':'idle'}},kind='claude',screen='',sources={n:(folder/n).read_text() for n in ('bridge.py','binding.py','images.py','clipboard.py','history_cache.py')})
+            request=dict(address='t1',terminal={'foreground':{'pid':os.getpid()},'status':{'state':'idle'}},kind='claude',screen='',sources={n:(folder/n).read_text() for n in ('bridge.py','binding.py','images.py','clipboard.py','history_cache.py','activity.py')})
             result=subprocess.run([sys.executable,'-c',remote.WORKER],input=json.dumps(request),capture_output=True,text=True,env={**os.environ,'HOME':temp},timeout=10)
             data=json.loads(zlib.decompress(base64.b64decode(json.loads(result.stdout)['packed'])))
             self.assertEqual(data['session'],sid)
             self.assertEqual(data['messages'][0]['text'],'Remote fixture response')
     def test_remote_snapshot_hides_permission_prompt(self):
-        response=SimpleNamespace(returncode=0,stdout=json.dumps({'session':'s','status':'blocked','messages':[],'prompt':{'title':'Bash command'}}))
+        background={'jobs':[{'id':'shell','status':'running','title':'Remote fixture'}]}
+        response=SimpleNamespace(returncode=0,stdout=json.dumps({'session':'s','status':'blocked','messages':[],'prompt':{'title':'Bash command'},'background':background}))
         with patch.object(bridge,'terminal',return_value=({'status':{'state':'blocked','kind':'permission'}},'claude',42)),patch.object(bridge.b,'run',return_value=SimpleNamespace(returncode=0,stdout='{"text":""}')),patch.object(remote.subprocess,'run',return_value=response):
-            self.assertNotIn('prompt',remote.snapshot('mbp/t1'))
+            result=remote.snapshot('mbp/t1')
+            self.assertNotIn('prompt',result)
+            self.assertEqual(result['background'],background)
     def test_send_targets_full_remote_address(self):
         data={'session':'s','status':'idle','process_pid':42}
         terminal=({'status':{'state':'idle'}},'claude',42)

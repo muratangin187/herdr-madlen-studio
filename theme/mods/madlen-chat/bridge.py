@@ -11,6 +11,8 @@ import images
 import clipboard
 import time
 import sqlite3
+import subprocess
+import activity
 from datetime import datetime
 
 
@@ -444,8 +446,12 @@ def snapshot(address,limit=None):
     status=(t.get('status') or {}).get('state','idle')
     prompt=permission_prompt(address,t) if kind=='claude' else None
     context=context_usage(path) if kind=='claude' and path and not projection else None
+    try:
+        background=activity.claude_jobs(path,sid,(t.get('foreground') or {}).get('pid')) if kind=='claude' and path else activity.codex_jobs(sid) if kind=='codex' and projection else dict(jobs=[])
+    except (OSError,ValueError,subprocess.TimeoutExpired):
+        background=dict(jobs=[],unavailable=True)
     result=dict(terminal=address,session=sid,process_key=process_key(t,kind),unbound=unbound,
-                kind=kind,status=status,messages=messages,more=more,prompt=prompt,context=context)
+                kind=kind,status=status,messages=messages,more=more,prompt=prompt,context=context,background=background)
     # The remote worker has its own transport cache on the viewing computer.
     if not getattr(sys,'madlen_remote_worker',False):
         import history_cache

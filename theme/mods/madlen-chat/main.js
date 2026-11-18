@@ -5,6 +5,7 @@ import { conversation, visibleMessages, questionView } from './turns.js';
 import { summarizeTool, summarizeGroup } from './tool-summary.js';
 import { makeOutgoing, reconcileOutgoing, outgoingFor, mergeOutgoing, deliveryLabel, serializeOutbox, restoreOutbox } from './outbox.js';
 import { linkifyFiles, linkTarget } from './links.js';
+import { backgroundView, elapsedLabel } from './activity.js';
 // Chat renders the newest PAGE messages (tools excluded); older ones load on request.
 const PAGE=40;
 // A `!` command's output shows this many lines until expanded.
@@ -102,7 +103,7 @@ export default class MadlenChat extends View {
     const active=this.currentTarget()?.terminal, now=Date.now();
     const live=new Map(terminals().map(t=>[t.address,t.status]));
     const candidates=panes().filter(p=>p.terminal&&['codex','claude'].some(a=>(p.app??p.program?.name??'').toLowerCase().includes(a)))
-      .filter(p=>!this.pending.has(p.terminal)&&(this.reports.get(p.terminal)!==live.get(p.terminal)||now-(this.updated.get(p.terminal)??0)>=(live.get(p.terminal)==='working'?6000:30000)))
+      .filter(p=>!this.pending.has(p.terminal)&&(this.reports.get(p.terminal)!==live.get(p.terminal)||now-(this.updated.get(p.terminal)??0)>=(live.get(p.terminal)==='working'||this.cache.get(p.terminal)?.background?.jobs?.some(j=>['running','unknown'].includes(j.status))?6000:30000)))
       .sort((a,b)=>(a.terminal===active?-1:b.terminal===active?1:0)||((this.updated.get(a.terminal)??0)-(this.updated.get(b.terminal)??0)));
     const p=candidates[0];if(!p)return;
     const target={terminal:p.terminal,pane:p.pane,tab:p.tab};
@@ -463,6 +464,32 @@ export default class MadlenChat extends View {
         .child(div().min_w(0).text_size(12).text_color(t.dim).child(this.data?.cached?'Güncel soru durumu kontrol ediliyor…':'Yanıtınızı bu oturumun terminalinde verin.'))
         .when(!this.data?.cached,e=>e.child(this.button(`answer-${m.id}`,'Terminalde yanıtla →',()=>this.back(),true)))));
   }
+  backgroundCard(activity,t){
+    const color=activity.stale?t.dim:activity.running?t.working:activity.failed?t.blocked:activity.unknown||activity.unavailable?t.muted:t.done;
+    return v_flex().id('background-activity').flex_none().ml(28).mr(44).mb(8).px(14).py(12).gap(8).rounded(12).border(1).border_color(t.border).bg(t.surface)
+      .child(h_flex().gap(8).items_center()
+        .when(activity.busy,e=>e.child(svg('mods/madlen-chrome/spinner.svg').size(12).spin(900)))
+        .child(div().min_w(0).flex_1().font_semibold().text_size(12).text_color(color).child(activity.label))
+        .child(this.button('background-terminal','Terminalde aç →',()=>this.back())))
+      .when(Boolean(activity.detail),e=>e.child(div().text_size(12).text_color(t.dim).child(activity.detail)))
+      .child(v_flex().id('background-jobs').min_h(0).max_h(200).overflow_y_scroll().gap(6).children(activity.jobs.map(job=>{
+        const key=`background-job-${job.id}`,open=Boolean(this.expanded[key]);
+        const state=job.status==='running'?'Çalışıyor':job.status==='completed'?'Tamamlandı':job.status==='failed'?'Başarısız':job.status==='stopped'?'Durduruldu':'Durum bilinmiyor';
+        const latest=(job.output??'').split('\n').filter(Boolean).at(-1);
+        const title=job.title==='Shell komutu'&&job.command?job.command.split('\n')[0]:job.title;
+        return v_flex().id(key).min_w(0).flex_none().gap(6)
+          .child(h_flex().id(`toggle-${key}`).min_w(0).gap(10).items_center().cursor_pointer()
+            .on_click((_e,cx)=>{this.expanded[key]=!open;cx.notify();})
+            .child(div().text_size(10).text_color(t.dim).child(open?'▾':'▸'))
+            .child(div().min_w(0).flex_1().truncate().text_size(13).child(title||'Shell komutu'))
+            .child(div().flex_none().text_size(11).text_color(t.dim).child([activity.stale?'Son kayıt':state,elapsedLabel(job.elapsed_seconds)].filter(Boolean).join(' · '))))
+          .child(div().min_w(0).truncate().text_size(12).text_color(t.dim).child(latest??(activity.stale?'Son kayıtta çıktı yok.':job.status==='running'?'Henüz çıktı yok · işlem sürüyor':job.status==='unknown'?'Çalıştığı henüz doğrulanamadı.':'Çıktı kaydı yok.')))
+          .when(open,e=>e.child(v_flex().p(10).gap(8).rounded(8).bg(t.canvas).font_family(this.mono()).text_size(11)
+            .when(Boolean(job.command),el=>el.child(div().child(job.command)))
+            .when(Boolean(job.output),el=>el.child(div().text_color(t.muted).child(job.output.split('\n').slice(-6).join('\n'))))
+            .when(job.output_age_seconds!=null,el=>el.child(div().text_size(11).text_color(t.dim).child(`Son çıktı ${elapsedLabel(job.output_age_seconds)} önce`)))));
+      })));
+  }
   launchContext(){
     const space=spaces().find(s=>s.active),tab=space?.tabs?.find(t=>t.active);
     const candidates=panes().filter(p=>p.tab===tab?.id&&p.terminal);
@@ -576,6 +603,7 @@ export default class MadlenChat extends View {
     const ready=data&&!data.cached&&!this.error&&!this.pasting&&!this.staged[target?.terminal]&&['idle','done','working'].includes(status);
     const shell=this.shellMode(this.input.value());this.shellDraft=shell;
     const groups=conversation(mergeOutgoing(data?.messages??[],outgoing),data?.cached?data.status:status);
+    const background=backgroundView(data?.background,{cached:data?.cached,error:this.error});
 
     return v_flex().id('madlen-chat-root').track_focus(this.exitFocus).on_key_up((e,cx)=>this.exitKey(e,cx)).size_full().min_w(0).min_h(0).font_family('Helvetica Neue').text_size(14).text_color(t.foreground).bg(t.canvas)
       .on_mouse_up('left',()=>{this.dragging=false;}).on_hover(inside=>{if(!inside)this.dragging=false;})
@@ -607,12 +635,13 @@ export default class MadlenChat extends View {
           .when(Boolean(data?.more),e=>e.child(h_flex().w_full().max_w(this.columnWidth()).justify_center().child(this.button('chat-older',this.pending.has(target?.terminal)?'Yükleniyor…':'Daha eski mesajları göster',cx=>this.older(cx)))))
           .children(visibleMessages(groups,this.expanded).map(m=>this.part(m,t)))
           .when(Boolean(data?.prompt)&&status==='blocked',e=>e.child(this.permission(data.prompt,t)))
-          .when(Boolean(data),e=>e.child(h_flex().flex_none().gap(8).items_center().text_size(12).text_color(status==='working'||waiting?t.working:status==='blocked'?t.blocked:t.done)
-            .when(status==='working'||waiting,e=>e.child(svg('mods/madlen-chrome/spinner.svg').size(12).spin(900)))
-            .child(div().child(data?.cached?'Kaydedilen geçmiş · güncelleniyor…':status==='working'?'Yanıt hazırlanıyor…':status==='blocked'?'Devam etmek için yanıtınız gerekiyor.':waiting?waitingLabel:data?.unbound?'Mesaj göndermeye hazır':['idle','done'].includes(status)?'✓ Yanıt tamamlandı':'Oturum bağlanıyor…')))))
+          .when(Boolean(data),e=>e.child(h_flex().flex_none().gap(8).items_center().text_size(12).text_color(status==='working'||waiting||background.busy?t.working:status==='blocked'||background.failed?t.blocked:background.unknown||background.unavailable||background.stale?t.dim:t.done)
+            .when(status==='working'||waiting||background.busy,e=>e.child(svg('mods/madlen-chrome/spinner.svg').size(12).spin(900)))
+            .child(div().child(data?.cached?'Kaydedilen geçmiş · güncelleniyor…':status==='working'?'Yanıt hazırlanıyor…':status==='blocked'?'Devam etmek için yanıtınız gerekiyor.':waiting?waitingLabel:data?.unbound?'Mesaj göndermeye hazır':['idle','done'].includes(status)?background.footer??'✓ Yanıt tamamlandı':'Oturum bağlanıyor…')))))
         .when(this.maxOffset()>0,e=>e.child(div().id('chat-scroll-track').absolute().right(3).top(4).bottom(4).w(9).rounded(5).bg(t.border+'55').cursor_pointer()
           .on_mouse_down('left',(event,cx)=>{if(!event.local_position)return;this.dragging=true;this.scrollThumb(event.local_position.y,cx);cx.stop_propagation();})
           .child(div().absolute().top((this.viewport-8-this.thumbHeight())*(this.maxOffset()?this.offset/this.maxOffset():0)).w(9).h(this.thumbHeight()).rounded(5).bg(t.dim+'88')))))
+      .when(Boolean(target)&&background.show,e=>e.child(this.backgroundCard(background,t)))
       .when(Boolean(target),e=>e.child(div().on_key_up((e,cx)=>{if(e.key==='enter'&&!e.modifiers.shift){cx.stop_propagation();this.send(cx);}}).flex_none().w_full().pl(28).pr(44).mb(18).child(v_flex().w_full().max_w(this.columnWidth()).px(10).py(8).gap(8).rounded(14).border(1).border_color(shell?t.accent:t.border).bg(shell?t.background:t.surface)
         .when((this.imageDrafts[target?.terminal]??[]).length>0,e=>e.child(h_flex().gap(8).flex_wrap().children(this.imageDrafts[target.terminal].map((a,i)=>this.thumbnail(a,`draft-${i}`,true)))))
         .on_drop((event,cx)=>this.pasteImages(cx,event.paths??[]))

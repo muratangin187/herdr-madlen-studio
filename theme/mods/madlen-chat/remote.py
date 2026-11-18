@@ -62,7 +62,7 @@ def snapshot(address,limit=None):
     if screen.returncode:raise ValueError('Uzak terminal okunamadı; makine bağlantısını kontrol edin.')
     folder=Path(__file__).parent
     request=dict(limit=limit,known=history_cache.known(previous),cached_images=[p.name for p in (images.HOME/'data/madlen-chat/images').glob('*') if p.suffix!='.json'],address=local,terminal=t,kind=kind,screen=json.loads(screen.stdout).get('text',''),
-                 sources={name:(folder/name).read_text() for name in ('bridge.py','binding.py','images.py','clipboard.py','history_cache.py')})
+                 sources={name:(folder/name).read_text() for name in ('bridge.py','binding.py','images.py','clipboard.py','history_cache.py','activity.py')})
     try:
         response=subprocess.run(['hc','exec','--on',machine,'--timeout','25','--stdin','python3','-c',WORKER],input=json.dumps(request),capture_output=True,text=True,timeout=30)
     except subprocess.TimeoutExpired:raise ValueError('Uzak makine zamanında yanıt vermedi. Yenileyerek tekrar deneyin.')
