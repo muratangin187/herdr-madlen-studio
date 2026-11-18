@@ -85,13 +85,56 @@ def question_list(args):
         try:args=json.loads(args)
         except ValueError:return []
     if not isinstance(args,dict):return []
-    return [q for q in args.get('questions',[]) if isinstance(q,dict)]
+    questions=args.get('questions')
+    return [q for q in questions if isinstance(q,dict)] if isinstance(questions,list) else []
 
 
-def tool(id,name,args,status='completed',output=None):
+def question_result(item,output,error=False,answers=None):
+    """A receipt for an async question is not the person's answer."""
+    value=output
+    for _ in range(4):
+        if isinstance(value,str):
+            try:value=json.loads(value)
+            except ValueError:break
+        elif isinstance(value,dict):
+            error=error or value.get('isError') is True
+            if isinstance(value.get('structuredContent'),dict):value=value['structuredContent']
+            elif isinstance(value.get('content'),list):value=text_content(value['content'])
+            else:break
+        else:break
+    if error:
+        item.update(question_state='failed',status='failed');return
+    if isinstance(value,dict):
+        answers=answers if answers is not None else value.get('answers')
+    item['question_state']='answered' if answers else 'closed'
+    if answers:item['answers']=answers
+    elif isinstance(value,dict) and value.get('accepted') is True:item['question_state']='pending'
+    elif isinstance(value,str) and value.startswith('User has answered your questions:'):
+        item['question_state']='answered';item['answer_text']=value.split(':',1)[1].split('. You can now continue')[0].strip()[:10000]
+    item['status']='inProgress' if item['question_state']=='pending' else 'completed'
+
+
+def finalize_questions(messages):
+    """Close superseded prompts without claiming an unrelated message answered them."""
+    human_after=assistant_after=False
+    for item in reversed(messages):
+        if item['role']=='question' and item.get('question_state')=='pending':
+            if human_after or (not item.get('async_question') and (assistant_after or item.get('turn_status')=='completed')):
+                item['question_state']='closed';item['status']='completed'
+        elif item['role']=='user' and not item.get('queued'):human_after=True
+        elif item['role']=='assistant' and item.get('text'):assistant_after=True
+    return messages
+
+
+def tool(id,name,args,status=None,output=None):
     q=question_list(args) if any(s in name.lower() for s in ('request_user_input','askuserquestion')) else []
     detail=args if isinstance(args,str) else json.dumps(args,ensure_ascii=False,indent=2)
-    return dict(id=id,role='question' if q else 'tool',name=name,text=detail[:10000],status=status,questions=q,output=(str(output)[:10000] if output else ''))
+    item=dict(id=id,role='question' if q else 'tool',name=name,text=detail[:10000],status=status or 'completed',questions=q,output=(str(output)[:10000] if output is not None else ''))
+    if q:
+        item.update(question_state='pending',status='inProgress',async_question='request_user_input_async' in name.lower())
+        if output is not None:question_result(item,output,error=status=='failed')
+        elif status in ('completed','failed'):item.update(question_state='failed' if status=='failed' else 'closed',status=status)
+    return item
 
 
 def codex_item(item,ordinal):
@@ -100,7 +143,12 @@ def codex_item(item,ordinal):
         text=clean(text_content(item.get('content')))
         attachments=images.from_content(item.get('content',[]))
         return dict(id=id,role='user',text=text,attachments=attachments) if text or attachments else None
-    if typ=='agentMessage':return dict(id=id,role='assistant',text=item.get('text',''),phase=item.get('phase'))
+    if typ=='agentMessage':
+        questions=question_list(item)
+        if questions:
+            return dict(id=id,role='question',text=item.get('text',''),question_intro=item.get('text',''),
+                        questions=questions,question_state='pending',status='inProgress',async_question=True,phase=item.get('phase'))
+        return dict(id=id,role='assistant',text=item.get('text',''),phase=item.get('phase'))
     if typ=='commandExecution':return tool(id,'Terminal komutu',item.get('command',''),item.get('status'),item.get('aggregatedOutput'))
     if typ in ('mcpToolCall','dynamicToolCall'):
         return tool(id,item.get('tool') or item.get('name') or 'Araç',item.get('arguments',{}),item.get('status'),item.get('error') or item.get('result'))
@@ -124,10 +172,10 @@ def projected(sid,limit=None):
         for i,raw,turn,at,status,duration,final in rows:
             if limit and shown>=limit:more=True;break
             v=codex_item(json.loads(raw),i)
-            if v and (v.get('text') or v.get('attachments')):
+            if v and (v.get('text') or v.get('attachments') or v.get('questions')):
                 v.update(turn_id=turn,at=at,turn_status=status,duration_ms=duration,final_id=final)
                 out.append(v);shown+=v['role']!='tool'
-    return out[::-1],more
+    return finalize_questions(out[::-1]),more
 
 
 def claude_system_event(record, text, rid):
@@ -216,7 +264,12 @@ def record_items(r,kind,ordinal,results):
             else:items.append(event if event is not None else dict(id=rid,role=role,text=txt,attachments=attachments))
         for c in content if isinstance(content,list) else []:
             if c.get('type')=='tool_use':items.append(tool(c.get('id',rid),c.get('name','Araç'),c.get('input',{})))
-            elif c.get('type')=='tool_result':results[c.get('tool_use_id')]=text_content(c.get('content'))
+            elif c.get('type')=='tool_result':
+                # Keep answer metadata and errors alongside the result; the text
+                # alone cannot tell a completed question from an unanswered one.
+                result=r.get('toolUseResult') or {}
+                results[c.get('tool_use_id')]=dict(output=text_content(c.get('content')),error=bool(c.get('is_error')),
+                    answers=result.get('answers') if isinstance(result,dict) else None)
     for item in items:
         item['at']=timestamp_ms(r.get('timestamp'))
         if item['role']=='assistant' and kind=='codex':item['phase']=p.get('channel')
@@ -289,8 +342,12 @@ def read_records(path,kind,limit=None):
         if items or lifecycle:chunks.append((r,items));shown+=sum(m['role']!='tool' for m in items)
     out=annotate_turns(list(reversed(chunks)),kind)
     for m in out:
-        if m['id'] in results:m['output']=str(results[m['id']])[:10000]
-    return out,more
+        if m['id'] in results:
+            result=results[m['id']]
+            data=result if kind=='claude' else dict(output=result)
+            m['output']=str(data['output'])[:10000]
+            if m['role']=='question':question_result(m,**data)
+    return finalize_questions(out),more
 
 
 def records(path,kind,limit=None):

@@ -22,6 +22,7 @@ jobs:
       - run: node test-chat-send.mjs
       - run: node test-chat-links.mjs
       - run: node test-chat-turns.mjs
+      - run: node test-chat-questions.mjs
       - run: node test-chat-tools.mjs
       - run: node test-chat-exit.mjs
       - run: node test-previews.mjs

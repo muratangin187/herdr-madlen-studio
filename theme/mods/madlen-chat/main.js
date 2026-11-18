@@ -1,7 +1,7 @@
 import { View, div, svg, image } from 'gpui-kit';
 import { h_flex, v_flex, TextView, Textarea, TextareaState } from 'gpui-base';
 import { theme, settings, layout, shared, setShared, spaces, panes, terminals, run, exec, appHome, props, openOverlay, closeOverlay, knownAgents, checking, notify } from 'herdr';
-import { conversation, visibleMessages } from './turns.js';
+import { conversation, visibleMessages, questionView } from './turns.js';
 import { summarizeTool, summarizeGroup } from './tool-summary.js';
 import { makeOutgoing, reconcileOutgoing, outgoingFor, mergeOutgoing, deliveryLabel, serializeOutbox, restoreOutbox } from './outbox.js';
 import { linkifyFiles, linkTarget } from './links.js';
@@ -441,13 +441,28 @@ export default class MadlenChat extends View {
       .on_click((_e,cx)=>{this.follow=false;this.expanded[group.id]=!open;cx.notify();})
       .child(div().child(group.label)).child(div().text_size(10).child(open?'▾':'▸'));
   }
-  question(m,t){return v_flex().flex_none().max_w(this.columnWidth()).p(20).gap(14).rounded(18).border(1).border_color(t.accent+'66').bg(t.selected)
-    .child(h_flex().justify_between().child(div().font_semibold().text_size(12).text_color(t.accent).child('SORULAR')).child(div().text_size(12).text_color(t.dim).child('Oturum kaydı')))
-    .children((m.questions??[]).map((q,i)=>v_flex().gap(10).child(div().font_semibold().child(q.question??q.title??q.header??'Soru'))
-      .children((q.options??[]).map((o,j)=>v_flex().p(12).gap(4).rounded(10).border(1).border_color(t.border).bg(t.surface)
-        .child(div().child(`○  ${typeof o==='string'?o:o.label??''}`)).when(Boolean(o.description),e=>e.child(div().text_size(12).text_color(t.dim).child(o.description)))))))
-    .child(div().text_size(12).text_color(t.dim).child('Seçenekleri canlı terminalde yanıtlayın; burada geçmiş soru kartları da görünür.'))
-    .child(h_flex().justify_end().child(this.button(`answer-${m.id}`,'Terminalde yanıtla →',()=>this.back(),true)));}
+  question(m,t){
+    const qv=questionView(m),key=`question-${m.id}`,open=this.expanded[key]??qv.pending;
+    const color=qv.pending?t.accent:qv.answered?t.done:t.dim;
+    return v_flex().id(key).flex_none().w_full().max_w(this.columnWidth()).min_w(0).p(16).gap(10).rounded(14).border(1).border_color(qv.pending?t.accent+'66':t.border).bg(qv.pending?t.selected:t.surface)
+      .child(h_flex().id(`toggle-${key}`).justify_between().gap(12).items_center().cursor_pointer()
+        .on_click((_e,cx)=>{this.follow=false;this.expanded[key]=!open;cx.notify();})
+        .child(div().font_semibold().text_size(12).text_color(color).child(qv.label))
+        .child(div().text_size(12).text_color(t.dim).child(open?'▾ Daralt':'▸ Ayrıntılar')))
+      .when(Boolean(m.question_intro),e=>e.child(div().min_w(0).child(m.question_intro)))
+      .children(qv.questions.map(q=>v_flex().min_w(0).gap(6)
+        .when(q.title!==m.question_intro,e=>e.child(div().font_medium().child(q.title)))
+        .when(q.selected.length>0,e=>e.child(div().text_color(t.done).child(`Yanıt: ${q.selected.join(', ')}`)))
+        .when(open,e=>e.children(q.options.map(o=>{
+          const label=typeof o==='string'?o:o?.label??'',selected=q.selected.includes(label);
+          return v_flex().p(10).gap(4).rounded(10).border(1).border_color(selected?t.done:t.border).bg(t.canvas)
+            .child(div().child(`${selected?'●':'○'}  ${label}`)).when(Boolean(o?.description),e=>e.child(div().text_size(12).text_color(t.dim).child(o.description)));
+        })))))
+      .when(Boolean(m.answer_text)&&open,e=>e.child(div().text_size(12).text_color(t.muted).child(m.answer_text)))
+      .when(qv.pending,e=>e.child(h_flex().gap(12).justify_between().items_center()
+        .child(div().min_w(0).text_size(12).text_color(t.dim).child(this.data?.cached?'Güncel soru durumu kontrol ediliyor…':'Yanıtınızı bu oturumun terminalinde verin.'))
+        .when(!this.data?.cached,e=>e.child(this.button(`answer-${m.id}`,'Terminalde yanıtla →',()=>this.back(),true)))));
+  }
   launchContext(){
     const space=spaces().find(s=>s.active),tab=space?.tabs?.find(t=>t.active);
     const candidates=panes().filter(p=>p.tab===tab?.id&&p.terminal);

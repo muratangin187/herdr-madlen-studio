@@ -15,6 +15,19 @@ export function toolGroups(messages) {
   return out;
 }
 
+export function questionView(message) {
+  const state=message.question_state??(message.status==='failed'?'failed':message.output||message.status==='completed'?'closed':'pending');
+  const pending=state==='pending',answered=state==='answered';
+  const answers=message.answers??{};
+  const questions=(message.questions??[]).map(q=>{
+    const title=q.question??q.title??q.header??'Soru';
+    const value=answers[q.id]??answers[title];
+    const selected=typeof value==='string'?[value]:Array.isArray(value)?value:Array.isArray(value?.answers)?value.answers:[];
+    return {...q,title,selected,options:Array.isArray(q.options)?q.options:[]};
+  });
+  return {state,pending,answered,questions,label:pending?'Yanıt bekliyor':answered?'Yanıtlandı':state==='failed'?'Tamamlanmadı':'Geçmiş soru'};
+}
+
 export function conversation(messages,liveStatus) {
   const blocks=[];
   for(const message of messages){
